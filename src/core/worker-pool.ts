@@ -441,6 +441,8 @@ import { sessionConfiguredRuntimeDisplayName } from './cli-runtime-display.js';
 import { isSilentScheduledTurn } from './silent-schedule-turns.js';
 import { isTriggerFinalSuppressed } from './trigger-final-suppression.js';
 import {
+  acknowledgeProgressFinal,
+  deliverFinalThroughProgressCard,
   handleTurnProgressExternalReply,
   handleTurnProgressFact,
   handleTurnProgressResumed,
@@ -794,6 +796,18 @@ function turnProgressEligibilityFor(
     substitute: isSubstituteTurn(ds, turnId),
     managedOrSilent: isSilentScheduledTurn(ds, turnId)
       || armedThrough !== undefined && (dispatchAttempt === undefined || dispatchAttempt <= armedThrough),
+  };
+}
+
+function turnProgressDepsFor(
+  ds: DaemonSession,
+  reply: TurnProgressControllerDeps['reply'],
+): TurnProgressControllerDeps {
+  return {
+    reply,
+    reactDone: async primaryTurnId => {
+      await addReaction(ds.larkAppId, primaryTurnId, doneReactionEmojiFor(ds));
+    },
   };
 }
 
@@ -9839,13 +9853,10 @@ function setupWorkerHandlers(
       ? { ...opts, sourceSessionId: ds.session.sessionId }
       : opts,
   );
-  const progressDeps: TurnProgressControllerDeps = {
-    reply: (cardRefJson, turnId, uuid) =>
-      scopedReply(cardRefJson, 'interactive', turnId, { uuid }),
-    reactDone: async primaryTurnId => {
-      await addReaction(ds.larkAppId, primaryTurnId, doneReactionEmojiFor(ds));
-    },
-  };
+  const progressDeps = turnProgressDepsFor(
+    ds,
+    (cardRefJson, turnId, uuid) => scopedReply(cardRefJson, 'interactive', turnId, { uuid }),
+  );
   const ordinaryManagedSuppression = (
     turnId?: string,
     dispatchAttempt?: number,
@@ -12077,6 +12088,7 @@ function setupWorkerHandlers(
             settlement.generation,
             settlement.seq,
           )) {
+            acknowledgeProgressFinal(ds, msg.turnId);
             acknowledge(true);
             if (!hasUnsettledCodexAppDispatch(ds.session.codexAppDispatchLedger)) {
               try { await cb.onCodexAppLedgerDrained?.(ds); }
@@ -12212,6 +12224,7 @@ function setupWorkerHandlers(
                 // pop and cumulative runner ACK boundary. Only after this write
                 // may the worker acknowledge final-end to the runner.
                 sessionStore.updateSession(ds.session);
+                acknowledgeProgressFinal(ds, msg.turnId);
                 return true;
               } catch (err) {
                 ds.session.codexAppDispatchLedger = priorLedger;
@@ -12676,6 +12689,10 @@ function deliverFinalOutput(
       ? { ...opts, sourceSessionId: ds.session.sessionId }
       : opts,
   );
+  const progressDeps = turnProgressDepsFor(
+    ds,
+    (cardRefJson, turnId, uuid) => scopedReply(cardRefJson, 'interactive', turnId, { uuid }),
+  );
   setTimeout(async () => {
     if (!isStillOwned()) {
       logger.info(`[${t}] Bridge final_output abandoned — worker/session ownership changed`);
@@ -12968,6 +12985,25 @@ function deliverFinalOutput(
           );
         }
       };
+      const completePrimaryOutput = async (messageId: string): Promise<void> => {
+        recordPrimaryOutput(messageId);
+        if (msg.turnId.startsWith('mlrp_turn_')) {
+          markMessageListenerRunPreviewReplied(msg.turnId, {
+            sessionId: ds.session.sessionId,
+            replyMessageId: messageId,
+          });
+        }
+        if (preparedListenerReply?.kind === 'send' || preparedListenerReply?.kind === 'succeeded') {
+          finishVcMeetingImReply(config.session.dataDir, preparedListenerReply.ref, messageId);
+        }
+        ds.lastBridgeEmittedUuid = finalOutputDedupeKey(ds, msg);
+        logger.info(`[${t}] Bridge final_output forwarded (turn ${msg.turnId.substring(0, 8)}, ${msg.content.length} chars, kind=${msg.kind ?? 'bridge'}, attempt ${attempt + 1})`);
+        if (feedbackPolicy && baseFeedbackCard && messageId) {
+          await persistFinalOutputFeedback(ds, msg, safeAssistantText, effectiveCliId, messageId, feedbackPolicy, baseFeedbackCard, feedbackRequesterSubjectId, getBot(ds.larkAppId).config.feedbackWebhooks?.destinations, t);
+        }
+        if (!msg.codexAppSettlement) acknowledgeProgressFinal(ds, msg.turnId);
+        onComplete?.(true);
+      };
       if (preparedListenerReply?.kind === 'succeeded' && preparedListenerReply.messageId) {
         recordPrimaryOutput(preparedListenerReply.messageId);
         if (feedbackPolicy && baseFeedbackCard) {
@@ -12982,9 +13018,30 @@ function deliverFinalOutput(
         return;
       }
 
-      // Always deliver the answer as a fresh message — never PATCH a card in
-      // place. message.patch is silent (no Feishu notification / unread), which
-      // used to swallow the answer; a brand-new message always pings.
+      const progressDelivery = await deliverFinalThroughProgressCard(
+        ds,
+        msg,
+        canonicalOutput.content,
+        turnProgressEligibilityFor(ds, msg.turnId, msg.dispatchAttempt),
+        progressDeps,
+      );
+      if (progressDelivery.kind === 'delivered') {
+        if (!isStillOwned()) {
+          if (!msg.codexAppSettlement) {
+            ds.lastBridgeEmittedUuid = finalOutputDedupeKey(ds, msg);
+            acknowledgeProgressFinal(ds, msg.turnId);
+          }
+          onComplete?.(true);
+          return;
+        }
+        await completePrimaryOutput(progressDelivery.messageId);
+        return;
+      }
+
+      // The legacy/fallback path always sends a fresh message. Semantic
+      // progress is the explicit exception above: CardKit entity update keeps
+      // the visible execution unit as one card while still notifying on its
+      // original reply attachment.
       revalidateManagedSend();
       if (!isStillOwned()) {
         onComplete?.(false);
@@ -13016,22 +13073,7 @@ function deliverFinalOutput(
           : deliveryReplyOptions,
       );
       if (!isStillOwned()) { onComplete?.(true); return; }
-      recordPrimaryOutput(messageId);
-      if (msg.turnId.startsWith('mlrp_turn_')) {
-        markMessageListenerRunPreviewReplied(msg.turnId, {
-          sessionId: ds.session.sessionId,
-          replyMessageId: messageId,
-        });
-      }
-      if (preparedListenerReply?.kind === 'send' || preparedListenerReply?.kind === 'succeeded') {
-        finishVcMeetingImReply(config.session.dataDir, preparedListenerReply.ref, messageId);
-      }
-      ds.lastBridgeEmittedUuid = finalOutputDedupeKey(ds, msg);
-      logger.info(`[${t}] Bridge final_output forwarded (turn ${msg.turnId.substring(0, 8)}, ${msg.content.length} chars, kind=${msg.kind ?? 'bridge'}, attempt ${attempt + 1})`);
-      if (feedbackPolicy && baseFeedbackCard && messageId) {
-        await persistFinalOutputFeedback(ds, msg, safeAssistantText, effectiveCliId, messageId, feedbackPolicy!, baseFeedbackCard, feedbackRequesterSubjectId, getBot(ds.larkAppId).config.feedbackWebhooks?.destinations, t);
-      }
-      onComplete?.(true);
+      await completePrimaryOutput(messageId);
     } catch (err: any) {
       if (!isStillOwned()) { onComplete?.(false); return; }
       if (err instanceof MessageWithdrawnError) {

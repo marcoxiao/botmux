@@ -302,6 +302,88 @@ describe('Bridge final_output delivery (P2 retry)', () => {
     expect(ds.lastBridgeEmittedUuid).toBe(SCOPED_DEDUPE_KEY);
   });
 
+  it('finalizes an active semantic progress entity instead of sending a fresh reply', async () => {
+    const sessionReply = vi.fn(async () => 'om_fresh_duplicate');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/tmp',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+    const ds = makeDs();
+    ds.workerGeneration = 1;
+    ds.session.workerGeneration = 1;
+    ds.session.turnProgressBinding = {
+      schemaVersion: 1,
+      pluginId: 'semantic-progress',
+      primaryTurnId: 'turn-1',
+      memberTurnIds: ['turn-1'],
+      workerGeneration: 1,
+      cardId: 'card-1',
+      messageId: 'om_progress',
+      replyUuid: 'tp_r_existing',
+      cardSequence: 2,
+      deliveryState: 'active',
+    };
+    const deliverFinal = vi.fn(async () => {
+      ds.session.turnProgressBinding!.deliveryState = 'finalizing';
+      return { kind: 'delivered' as const, messageId: 'om_progress' };
+    });
+    const ackFinal = vi.fn(() => { delete ds.session.turnProgressBinding; });
+    ds.turnProgressHost = { owns: () => true, deliverFinal, ackFinal } as any;
+    const { __testOnly_deliverFinalOutput } = await import('../src/core/worker-pool.js') as any;
+
+    __testOnly_deliverFinalOutput(ds, finalOutputMsg(), 'tag', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(deliverFinal).toHaveBeenCalledOnce();
+    expect(JSON.parse(deliverFinal.mock.calls[0][0])).toMatchObject({ schema: '2.0' });
+    expect(deliverFinal.mock.calls[0][0]).toContain('final answer');
+    expect(sessionReply).not.toHaveBeenCalled();
+    expect(ds.lastBridgeEmittedUuid).toBe(SCOPED_DEDUPE_KEY);
+    expect(ackFinal).toHaveBeenCalledWith('turn-1');
+    expect(ds.turnProgressHost).toBeUndefined();
+  });
+
+  it('uses the existing stable fresh-reply fallback after a permanent entity update failure', async () => {
+    const sessionReply = vi.fn(async () => 'om_fallback');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/tmp',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+    const ds = makeDs();
+    ds.workerGeneration = 1;
+    ds.session.workerGeneration = 1;
+    ds.session.turnProgressBinding = {
+      schemaVersion: 1,
+      pluginId: 'semantic-progress',
+      primaryTurnId: 'turn-1',
+      memberTurnIds: ['turn-1'],
+      workerGeneration: 1,
+      cardId: 'card-1',
+      messageId: 'om_progress',
+      replyUuid: 'tp_r_existing',
+      cardSequence: 2,
+      deliveryState: 'active',
+    };
+    const deliverFinal = vi.fn(async () => {
+      delete ds.session.turnProgressBinding;
+      return { kind: 'fallback' as const };
+    });
+    ds.turnProgressHost = { owns: () => true, deliverFinal } as any;
+    const { __testOnly_deliverFinalOutput } = await import('../src/core/worker-pool.js') as any;
+
+    __testOnly_deliverFinalOutput(ds, finalOutputMsg(), 'tag', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(deliverFinal).toHaveBeenCalledOnce();
+    expect(sessionReply).toHaveBeenCalledOnce();
+    expect(sessionReply.mock.calls[0][5]?.uuid).toMatch(/^bf_[0-9a-f]{46}$/);
+    expect(ds.lastBridgeEmittedUuid).toBe(SCOPED_DEDUPE_KEY);
+  });
+
   it('records a feedback Delivery only after the canonical final_output send returns its platform message id', async () => {
     vi.mocked(getBot).mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', feedback: { enabled: true } },
@@ -517,6 +599,68 @@ describe('Bridge final_output delivery (P2 retry)', () => {
     await vi.waitFor(() => expect(sessionReply).toHaveBeenCalledTimes(2));
     expect(sessionReply.mock.calls[1][5]?.replyTarget)
       .toEqual({ mode: 'thread', rootMessageId: 'om_topic_b' });
+  });
+
+  it('keeps a semantic final binding until the Codex settlement is durably committed', async () => {
+    const sessionReply = vi.fn(async () => 'om_fresh_duplicate');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/tmp',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+    const ds = makeDs();
+    ds.adoptedFrom = undefined;
+    ds.session.cliId = 'codex-app';
+    ds.workerGeneration = 1;
+    ds.session.workerGeneration = 1;
+    ds.session.codexAppDispatchLedger = [{
+      dispatchId: 'dispatch-semantic', turnId: 'turn-1', state: 'prepared',
+      content: 'final answer', deliverySink: 'lark',
+    }];
+    __testOnly_setupWorkerHandlers(ds, ds.worker as any);
+    ds.session.turnProgressBinding = {
+      schemaVersion: 1,
+      pluginId: 'semantic-progress',
+      primaryTurnId: 'turn-1',
+      memberTurnIds: ['turn-1'],
+      workerGeneration: ds.workerGeneration!,
+      cardId: 'card-1',
+      messageId: 'om_progress',
+      replyUuid: 'tp_r_existing',
+      cardSequence: 3,
+      deliveryState: 'finalizing',
+    };
+    const deliverFinal = vi.fn(async () => ({ kind: 'delivered' as const, messageId: 'om_progress' }));
+    const ackFinal = vi.fn(() => { delete ds.session.turnProgressBinding; });
+    ds.turnProgressHost = { owns: () => true, deliverFinal, ackFinal } as any;
+    updateSessionMock.mockImplementationOnce(() => { throw new Error('disk unavailable'); });
+    const message = {
+      type: 'final_output', sessionId: ds.session.sessionId,
+      content: 'final answer', lastUuid: 'uuid-semantic', turnId: 'turn-1',
+      codexAppSettlement: {
+        requestId: 'settle-semantic', generation: 'generation-semantic', seq: 1,
+        dispatchId: 'dispatch-semantic',
+      },
+    } satisfies Extract<WorkerToDaemon, { type: 'final_output' }>;
+
+    (ds.worker as any).emit('message', message);
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.waitFor(() => expect((ds.worker as any).send).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 'settle-semantic', ok: false }),
+    ));
+    expect(deliverFinal).toHaveBeenCalledOnce();
+    expect(sessionReply).not.toHaveBeenCalled();
+    expect(ackFinal).not.toHaveBeenCalled();
+    expect(ds.session.turnProgressBinding?.deliveryState).toBe('finalizing');
+
+    (ds.worker as any).emit('message', message);
+    await vi.waitFor(() => expect((ds.worker as any).send).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 'settle-semantic', ok: true }),
+    ));
+    expect(deliverFinal).toHaveBeenCalledOnce();
+    expect(ackFinal).toHaveBeenCalledWith('turn-1');
+    expect(ds.session.turnProgressBinding).toBeUndefined();
   });
 
   it.each(['doc_comment', 'http_wait', 'http_async', 'suppressed'] as const)(

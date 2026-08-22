@@ -9,8 +9,12 @@ import {
   resolveTurnProgressPluginId,
   type LoadedTurnProgressPlugin,
 } from '../plugins/runtime.js';
-import { TurnProgressHost } from './host.js';
-import { canStartTurnProgress, type TurnProgressEligibilityInput } from './eligibility.js';
+import { TurnProgressHost, type FinalCardDelivery } from './host.js';
+import {
+  canDeliverFinalInProgressCard,
+  canStartTurnProgress,
+  type TurnProgressEligibilityInput,
+} from './eligibility.js';
 import { normalizeTurnProgressFact, type TurnProgressPluginV1 } from './protocol.js';
 
 export interface TurnProgressControllerDeps {
@@ -40,6 +44,10 @@ const hostStarts = new WeakMap<DaemonSession, {
   promise: Promise<TurnProgressHost | null>;
 }>();
 const diagnostics = new WeakMap<DaemonSession, Set<string>>();
+const finalAckRetries = new WeakMap<DaemonSession, {
+  turnId: string;
+  timer: ReturnType<typeof setTimeout>;
+}>();
 
 const finalOnlyPlugin: TurnProgressPluginV1 = {
   schemaVersion: 1,
@@ -443,4 +451,74 @@ export async function handleTurnProgressTerminal(
     status: terminal.status,
     ...(errorCode ? { errorCode } : {}),
   }, true);
+}
+
+export async function deliverFinalThroughProgressCard(
+  ds: DaemonSession,
+  message: Extract<WorkerToDaemon, { type: 'final_output' }>,
+  cardJson: string,
+  eligibility: TurnProgressEligibilityInput,
+  deps: TurnProgressControllerDeps,
+): Promise<FinalCardDelivery> {
+  if (message.sessionId && message.sessionId !== ds.session.sessionId) {
+    return { kind: 'not_applicable' };
+  }
+  const binding = ds.session.turnProgressBinding;
+  if (!binding || !binding.memberTurnIds.includes(message.turnId)) {
+    return { kind: 'not_applicable' };
+  }
+  if (binding.primaryDispatchAttempt !== undefined
+    && message.dispatchAttempt !== undefined
+    && binding.primaryDispatchAttempt !== message.dispatchAttempt) {
+    return { kind: 'not_applicable' };
+  }
+  const effective = {
+    ...eligibility,
+    pluginId: binding.pluginId,
+    suppressDelivery: message.suppressDelivery === true,
+    steerSuperseded: message.disposition === 'steer_superseded',
+  };
+  if (!canDeliverFinalInProgressCard(effective) || ds.workerGeneration === undefined) {
+    return { kind: 'not_applicable' };
+  }
+  const ensured = await ensureHost(
+    ds,
+    message.turnId,
+    message.dispatchAttempt,
+    ds.workerGeneration,
+    effective,
+    deps,
+  );
+  return ensured.kind === 'ready'
+    ? ensured.host.deliverFinal(cardJson)
+    : { kind: ensured.kind === 'fallback' ? 'fallback' : 'not_applicable' };
+}
+
+function attemptProgressFinalAck(ds: DaemonSession, turnId: string, attempt: number): void {
+  const binding = ds.session.turnProgressBinding;
+  if (binding?.deliveryState !== 'finalizing' || !binding.memberTurnIds.includes(turnId)) return;
+  try {
+    if (ds.turnProgressHost) ds.turnProgressHost.ackFinal(turnId);
+    else persistBinding(ds, undefined);
+    ds.turnProgressHost = undefined;
+    const pending = finalAckRetries.get(ds);
+    if (pending) clearTimeout(pending.timer);
+    finalAckRetries.delete(ds);
+  } catch (error) {
+    diagnoseOnce(ds, 'final_ack_failed', error);
+    if (ds.session.status !== 'active' || finalAckRetries.has(ds)) return;
+    const nextAttempt = attempt + 1;
+    const timer = setTimeout(() => {
+      finalAckRetries.delete(ds);
+      attemptProgressFinalAck(ds, turnId, nextAttempt);
+    }, Math.min(250 * 2 ** attempt, 4_000));
+    timer.unref?.();
+    finalAckRetries.set(ds, { turnId, timer });
+  }
+}
+
+export function acknowledgeProgressFinal(ds: DaemonSession, turnId: string): void {
+  const pending = finalAckRetries.get(ds);
+  if (pending?.turnId === turnId) return;
+  attemptProgressFinalAck(ds, turnId, 0);
 }
