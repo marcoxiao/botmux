@@ -71,7 +71,14 @@ describe('semantic progress card', () => {
     const input = state();
     input.operationCount = 37;
     input.currentText = '进'.repeat(300);
-    const serialized = JSON.stringify(render(input, context()));
+    const card = render(input, context());
+    const serialized = JSON.stringify(card);
+    expect(card.body.elements.find(element => element.element_id === 'progress_details')).toEqual({
+      tag: 'markdown',
+      element_id: 'progress_details',
+      content: '已处理 37 个操作',
+    });
+    expect(serialized).not.toContain('"tag":"note"');
     expect(serialized).toContain('已处理 37 个操作');
     expect(serialized).toContain('进'.repeat(240));
     expect(serialized).not.toContain('进'.repeat(241));

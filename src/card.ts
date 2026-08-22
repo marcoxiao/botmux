@@ -66,14 +66,11 @@ export function detailsElement(
 ): Record<string, unknown> | undefined {
   if (operationCount <= 0) return undefined;
   return {
-    tag: 'note',
+    tag: 'markdown',
     element_id: 'progress_details',
-    elements: [{
-      tag: 'plain_text',
-      content: locale === 'en'
-        ? `${operationCount} operation${operationCount === 1 ? '' : 's'} processed`
-        : `已处理 ${operationCount} 个操作`,
-    }],
+    content: locale === 'en'
+      ? `${operationCount} operation${operationCount === 1 ? '' : 's'} processed`
+      : `已处理 ${operationCount} 个操作`,
   };
 }
 
