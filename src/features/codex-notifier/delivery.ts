@@ -27,6 +27,7 @@ export interface CodexNotifierDeliveryCoordinatorOptions {
 
 /** 决定通知落点；事件账本和重试语义仍由 daemon/outbox 负责。 */
 export class CodexNotifierDeliveryCoordinator {
+  private readonly eventDeliveries = new Map<string, Promise<CodexNotifierDeliveryResult>>();
   private readonly latches = new Map<string, Promise<unknown>>();
   private readonly sendMessage: typeof larkSendMessage;
   private readonly replyMessage: typeof larkReplyMessage;
@@ -43,8 +44,28 @@ export class CodexNotifierDeliveryCoordinator {
     targetChatId?: string,
     requestOptions?: LarkRequestOptions,
   ): Promise<CodexNotifierDeliveryResult> {
-    if (!targetChatId) return this.deliverOwnerDm(event, requestOptions);
+    const eventKey = `${this.options.larkAppId}:${event.eventId}`;
+    const inFlight = this.eventDeliveries.get(eventKey);
+    if (inFlight) return inFlight;
 
+    const delivery = targetChatId
+      ? this.queueGroupDelivery(event, targetChatId, requestOptions)
+      : this.deliverOwnerDm(event, requestOptions);
+    this.eventDeliveries.set(eventKey, delivery);
+    try {
+      return await delivery;
+    } finally {
+      if (this.eventDeliveries.get(eventKey) === delivery) {
+        this.eventDeliveries.delete(eventKey);
+      }
+    }
+  }
+
+  private async queueGroupDelivery(
+    event: CodexTaskCompletedEvent,
+    targetChatId: string,
+    requestOptions?: LarkRequestOptions,
+  ): Promise<CodexNotifierDeliveryResult> {
     const key = `${this.options.larkAppId}:${targetChatId}:${event.threadId}`;
     const previous = this.latches.get(key) ?? Promise.resolve();
     const current = previous

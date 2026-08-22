@@ -53,7 +53,7 @@ import {
 } from './core/supervisor-shutdown-protocol.js';
 import { readSupervisorProcessStartIdentity } from './core/process-start-identity.js';
 import { statSync } from 'node:fs';
-import { addReaction, deleteMessage, getChatContext, getChatMode, getChatNameAndMode, getMessageChatId, listChatMemberOpenIds, MessageWithdrawnError, replyMessage, resolveAllowedUsersWithMap, sendMessage, sendUserMessage, updateMessage, type EntryResolveStatus } from './im/lark/client.js';
+import { addReaction, deleteMessage, getChatContext, getChatMode, getChatModeStrict, getChatNameAndMode, getMessageChatId, listChatMemberOpenIds, MessageWithdrawnError, replyMessage, resolveAllowedUsersWithMap, sendMessage, sendUserMessage, updateMessage, type EntryResolveStatus } from './im/lark/client.js';
 import { resolveGroupJoinPrompt, waitForAllowedUserInChat } from './core/auto-start.js';
 import {
   loadBotConfigAtIndex,
@@ -386,12 +386,13 @@ import type { WorkflowDaemonMutation } from './workflows/v3/daemon-ipc-client.js
 import type { SavedWorkflowActorContext } from './workflows/v3/library-service.js';
 import { resolveEffectivePluginIds } from './core/plugins/effective.js';
 import {
-  buildCodexCompletionCard,
   buildCodexNotifierResultCard,
   CODEX_NOTIFIER_PLUGIN_ID,
+  CodexNotifierDeliveryCoordinator,
   CodexNotifierEventStore,
   CodexNotifierEventValidationError,
-  codexNotifierMessageUuid,
+  CodexNotifierTopicRouteStore,
+  codexNotifierTopicRoutesPath,
   createCodexNotifierCardActionHandler,
   materializeCodexNotifierOutboxEvent,
   openCodexAppThread,
@@ -4870,6 +4871,8 @@ const v3GateRunner = createV3GateRunner({
 const botHandlers = new Map<string, EventHandlers>();
 
 const codexNotifierStores = new Map<string, CodexNotifierEventStore>();
+const codexNotifierTopicRouteStores = new Map<string, CodexNotifierTopicRouteStore>();
+const codexNotifierDeliveryCoordinators = new Map<string, CodexNotifierDeliveryCoordinator>();
 const codexNotifierDeliveries = new Map<string, Promise<{ status: 'accepted'; messageId: string }>>();
 const CODEX_NOTIFIER_INGRESS_MAX_BYTES = 128 * 1024;
 const CODEX_NOTIFIER_DELIVERY_TIMEOUT_MS = 10_000;
@@ -4889,6 +4892,28 @@ function codexNotifierStore(larkAppId: string): CodexNotifierEventStore {
   );
   codexNotifierStores.set(larkAppId, store);
   return store;
+}
+
+function codexNotifierTopicRouteStore(larkAppId: string): CodexNotifierTopicRouteStore {
+  const existing = codexNotifierTopicRouteStores.get(larkAppId);
+  if (existing) return existing;
+  const store = new CodexNotifierTopicRouteStore(
+    codexNotifierTopicRoutesPath(config.session.dataDir, larkAppId),
+  );
+  codexNotifierTopicRouteStores.set(larkAppId, store);
+  return store;
+}
+
+function codexNotifierDeliveryCoordinator(larkAppId: string): CodexNotifierDeliveryCoordinator {
+  const existing = codexNotifierDeliveryCoordinators.get(larkAppId);
+  if (existing) return existing;
+  const coordinator = new CodexNotifierDeliveryCoordinator({
+    larkAppId,
+    routeStore: codexNotifierTopicRouteStore(larkAppId),
+    getOwnerOpenId: () => getOwnerOpenId(larkAppId) ?? resolvePrimaryOwnerOpenId(larkAppId),
+  });
+  codexNotifierDeliveryCoordinators.set(larkAppId, coordinator);
+  return coordinator;
 }
 
 function codexNotifierIngressEnabled(larkAppId: string, legacyPlugin = false): boolean {
@@ -4929,6 +4954,7 @@ async function enrichCodexNotifierEvent(
 async function deliverCodexNotifierEvent(
   larkAppId: string,
   event: CodexTaskCompletedEvent,
+  targetChatId?: string,
 ): Promise<{ status: 'accepted' | 'duplicate'; messageId: string }> {
   const store = codexNotifierStore(larkAppId);
   const enrichedEvent = store.get(event.eventId) ? event : await enrichCodexNotifierEvent(larkAppId, event);
@@ -4954,27 +4980,23 @@ async function deliverCodexNotifierEvent(
   if (current) return current;
 
   const delivery = (async (): Promise<{ status: 'accepted'; messageId: string }> => {
-    const ownerOpenId = getOwnerOpenId(larkAppId) ?? resolvePrimaryOwnerOpenId(larkAppId);
-    if (!ownerOpenId) throw new Error('codex_notifier_owner_unavailable');
     store.updateDelivery(event.eventId, { status: 'pending' });
     try {
-      const messageId = await runWithAbortDeadline(
+      const result = await runWithAbortDeadline(
         'codex_notifier_delivery',
         CODEX_NOTIFIER_DELIVERY_TIMEOUT_MS,
-        signal => sendUserMessage(
-          larkAppId,
-          ownerOpenId,
-          buildCodexCompletionCard(deliveryEvent),
-          'interactive',
-          codexNotifierMessageUuid(event.eventId),
-          {
-            timeoutMs: CODEX_NOTIFIER_DELIVERY_TIMEOUT_MS,
-            signal,
-          },
+        signal => codexNotifierDeliveryCoordinator(larkAppId).deliver(
+          deliveryEvent,
+          targetChatId,
+          { timeoutMs: CODEX_NOTIFIER_DELIVERY_TIMEOUT_MS, signal },
         ),
       );
-      store.updateDelivery(event.eventId, { status: 'delivered', messageId, incrementAttempts: false });
-      return { status: 'accepted', messageId };
+      store.updateDelivery(event.eventId, {
+        status: 'delivered',
+        messageId: result.messageId,
+        incrementAttempts: false,
+      });
+      return { status: 'accepted', messageId: result.messageId };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       store.updateDelivery(event.eventId, {
@@ -5109,12 +5131,28 @@ async function adoptCodexNotifierEvent(
     ),
     signal,
   });
-  if (!chatId) throw new Error('无法定位完成通知所在的飞书私聊');
+  if (!chatId) throw new Error('无法定位完成通知所在的飞书会话');
   signal.throwIfAborted();
 
   const botCfg = getBot(larkAppId).config;
-  const scope: 'thread' | 'chat' = botCfg.p2pMode === 'thread' ? 'thread' : 'chat';
-  const anchor = scope === 'chat' ? chatId : cardMessageId;
+  const chatMode = await getChatModeStrict(larkAppId, chatId);
+  signal.throwIfAborted();
+  if (chatMode === 'unknown') throw new Error('无法确认完成通知所在会话');
+
+  let scope: 'thread' | 'chat';
+  let anchor: string;
+  let chatType: 'group' | 'p2p';
+  if (chatMode === 'p2p') {
+    scope = botCfg.p2pMode === 'thread' ? 'thread' : 'chat';
+    anchor = scope === 'chat' ? chatId : cardMessageId;
+    chatType = 'p2p';
+  } else {
+    const route = codexNotifierTopicRouteStore(larkAppId).get(event.threadId, chatId);
+    if (!route) throw new Error('话题路由已过期，请等待下一条完成通知');
+    scope = 'thread';
+    anchor = route.rootMessageId;
+    chatType = 'group';
+  }
   const activeKey = sessionKey(anchor, larkAppId);
   let ds = activeSessions.get(activeKey);
 
@@ -5138,7 +5176,7 @@ async function adoptCodexNotifierEvent(
   if (!ds) {
     const fallbackTitle = event.cwd.split(/[\\/]/).filter(Boolean).pop() ?? 'Codex App';
     const title = (event.title || `Codex App: ${fallbackTitle}`).slice(0, 50);
-    const session = sessionStore.createSession(chatId, cardMessageId, title, 'p2p');
+    const session = sessionStore.createSession(chatId, anchor, title, chatType, scope);
     const now = Date.now();
     session.larkAppId = larkAppId;
     session.scope = scope;
@@ -5156,7 +5194,7 @@ async function adoptCodexNotifierEvent(
       workerToken: null,
       larkAppId,
       chatId,
-      chatType: 'p2p',
+      chatType,
       scope,
       spawnedAt: Date.parse(session.createdAt) || now,
       cliVersion: getCurrentCliVersion(),
@@ -5239,7 +5277,7 @@ async function adoptCodexNotifierEvent(
           lastRepoScan,
         },
         larkAppId,
-        cardMessageId,
+        anchor,
       );
     } catch (err) {
       // 接管失败/超时:pending 已清空且不回滚(见上)。若曾丢弃过缓冲/未送达输入,把「已取消、
@@ -5253,7 +5291,7 @@ async function adoptCodexNotifierEvent(
     }
   }
 
-  const baseAdoptNotice = scope === 'chat'
+  const baseAdoptNotice = chatType === 'p2p' && scope === 'chat'
     ? '现在可以直接在当前私聊继续发送指令，消息会进入同一个 Codex App 任务；电脑或 Codex App 离线时会明确提示，不会排队。'
     : '请在本卡片的话题中继续发送指令，消息会进入同一个 Codex App 任务；电脑或 Codex App 离线时会明确提示，不会排队。';
   return buildCodexNotifierResultCard(
@@ -6220,6 +6258,7 @@ async function respondCodexNotifierIngress(
   larkAppId: string,
   rawEvent: unknown,
   pluginId?: string,
+  targetChatId?: string,
 ): Promise<void> {
   if (!codexNotifierIngressEnabled(larkAppId, pluginId === CODEX_NOTIFIER_PLUGIN_ID)) {
     return jsonRes(res, 403, { ok: false, error: 'codex_notifier_disabled' });
@@ -6237,7 +6276,7 @@ async function respondCodexNotifierIngress(
   }
 
   try {
-    const result = await deliverCodexNotifierEvent(larkAppId, event);
+    const result = await deliverCodexNotifierEvent(larkAppId, event, targetChatId);
     return jsonRes(res, 200, { ok: true, status: result.status, messageId: result.messageId });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -6278,7 +6317,13 @@ ipcRoute('POST', '/api/codex-notifier/events', async (req, res) => {
   if (item.targetBotAppId !== larkAppId) {
     return jsonRes(res, 403, { ok: false, error: 'target_bot_mismatch' });
   }
-  return respondCodexNotifierIngress(res, larkAppId, materializeCodexNotifierOutboxEvent(item));
+  return respondCodexNotifierIngress(
+    res,
+    larkAppId,
+    materializeCodexNotifierOutboxEvent(item),
+    undefined,
+    item.targetChatId,
+  );
 });
 
 // 旧独立插件的兼容入口保留一个迁移周期，只负责排空已经落盘的历史 outbox。

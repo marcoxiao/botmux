@@ -138,6 +138,25 @@ describe('Codex notifier delivery coordinator', () => {
     expect(replyMessage).toHaveBeenCalledTimes(1);
   });
 
+  it('reuses the in-flight delivery for an exact event retry', async () => {
+    const { coordinator, sendMessage, replyMessage } = createHarness();
+    const root = deferred<string>();
+    sendMessage.mockImplementationOnce(() => root.promise);
+    const completion = event('same-event');
+
+    const firstDelivery = coordinator.deliver(completion, 'oc_workbench');
+    const retriedDelivery = coordinator.deliver(completion, 'oc_workbench');
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    root.resolve('om_root');
+
+    await expect(Promise.all([firstDelivery, retriedDelivery])).resolves.toEqual([
+      { destination: 'group', messageId: 'om_root' },
+      { destination: 'group', messageId: 'om_root' },
+    ]);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(replyMessage).not.toHaveBeenCalled();
+  });
+
   it('does not serialize independent threads', async () => {
     const { coordinator, sendMessage } = createHarness();
     const first = deferred<string>();

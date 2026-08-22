@@ -48,6 +48,7 @@ vi.mock('../src/im/lark/client.js', async () => {
   return {
     ...actual,
     getMessageChatId: vi.fn(async () => 'oc_dm'),
+    getChatModeStrict: vi.fn(async () => 'p2p'),
   };
 });
 
