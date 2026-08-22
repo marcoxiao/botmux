@@ -14,6 +14,12 @@ export {
   DEFAULT_MAX_CODEX_NOTIFIER_EVENTS,
   DEFAULT_MAX_CODEX_NOTIFIER_RECEIPTS,
 } from './event-store.js';
+export {
+  CodexNotifierTopicRouteStore,
+  DEFAULT_MAX_CODEX_NOTIFIER_TOPIC_ROUTES,
+  type CodexNotifierTopicRoute,
+} from './topic-route-store.js';
+export { codexNotifierTopicRoutesPath } from './paths.js';
 export type {
   CodexNotifierDeliveryUpdate,
   RecordCodexNotifierEventResult,
