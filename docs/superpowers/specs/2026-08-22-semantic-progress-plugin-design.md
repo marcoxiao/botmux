@@ -140,7 +140,7 @@ turn-progress/index.js
 
 插件入口为受信任的进程内模块。入口导出 `schemaVersion: 1` 以及 `initialState`、`reduce`、`render` 三个函数，Core 在激活时做运行时校验。插件不 import `src/` 私有模块；协议采用小型结构化对象，插件内部自行声明对应 TypeScript 类型，不额外创建 SDK 包。
 
-插件集合从现有 session plugin manifest 读取并冻结到当前 Worker generation，不能在同一执行单元中因 Dashboard 热切换而更换实现。同一个 Bot 同时只能启用一个 turn-progress 贡献；出现多个时明确报配置冲突，不定义插件优先级或组合规则。
+插件集合从现有 session plugin manifest 读取并冻结到当前 Worker generation，不能在同一执行单元中因 Dashboard 热切换而更换实现。同一个 Bot 同时只能启用一个 turn-progress 贡献；出现多个时明确报配置冲突，不定义插件优先级或组合规则。冲突或入口校验失败时 fail closed：记录可诊断错误并保留现有 streaming/final 链路，不能先压制旧卡再把本轮留成无卡状态。
 
 ### 6.2 Worker 新增事实与插件事件
 
@@ -312,6 +312,8 @@ Codex App ordered steer 不创建第二张卡：现有 `steer_accepted` 将补�
 - 状态边界绕过普通节流，但仍进入同一串行队列；
 - 中间进度更新失败只记录并等待下一次最新快照，不做无界重试；
 - 终态暂时错误或响应不明确时持续保留同一 durable intent，以封顶退避间隔重试，直到明确成功、明确永久失败或 turn 失去权威；不更换 UUID/sequence，也不并行双发；明确永久失败后才回到 fresh final。
+- 插件在首次 `initialState`/`render` 失败时回到旧开始卡；卡片已挂载后的 `reduce`/`render` 异常只隔离后续语义投影并记录诊断，不影响 CLI，也不丢掉由 Core 直接更新 canonical final 的能力。
+- durable intent 必须先原子持久化再调用远端 update；若本地持久化失败则不得发出该远端请求。初始 create 后若 binding 无法持久化，未挂载 entity 直接放弃并回到旧链路。
 
 ### 10.2 权限与限流
 
