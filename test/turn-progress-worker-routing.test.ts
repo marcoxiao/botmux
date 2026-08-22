@@ -312,6 +312,45 @@ describe('turn progress worker routing controller', () => {
     expect(mocks.create).toHaveBeenCalledTimes(2);
   });
 
+  it('routes empty waiting and completed delivery as semantic events without core presentation copy', async () => {
+    const ds = daemonSession();
+    await handleTurnProgressFact(ds, {
+      type: 'turn_progress', sessionId: 'session-1', turnId: 'turn-1', dispatchAttempt: 1,
+      fact: { schemaVersion: 1, seq: 1, atMs: 1, kind: 'turn_started' },
+    }, 3, eligible, deps);
+
+    await handleTurnProgressWaiting(ds, 'turn-1', '', eligible, deps);
+    await handleTurnProgressResumed(ds, 'turn-1', eligible, deps);
+    await handleTurnProgressTerminal(ds, {
+      type: 'turn_terminal', sessionId: 'session-1', turnId: 'turn-1', dispatchAttempt: 1,
+      status: 'completed', outputDisposition: 'card',
+    }, eligible, deps);
+
+    await vi.waitFor(() => {
+      const cards = mocks.update.mock.calls.map(call => JSON.parse(call[2] as string));
+      const serialized = JSON.stringify(cards);
+      expect(serialized).toContain('"kind":"finalizing"');
+      expect(serialized).not.toMatch(/等待输入|Waiting for input|正在确认结果|Confirming the result/u);
+    });
+  });
+
+  it('contains terminal persistence failure without rejecting the worker IPC handler', async () => {
+    const ds = daemonSession();
+    await handleTurnProgressFact(ds, {
+      type: 'turn_progress', sessionId: 'session-1', turnId: 'turn-1', dispatchAttempt: 1,
+      fact: { schemaVersion: 1, seq: 1, atMs: 1, kind: 'turn_started' },
+    }, 3, eligible, deps);
+    mocks.updateSession.mockImplementation(session => {
+      if (session.turnProgressBinding?.deliveryState === 'finalizing') throw new Error('disk full');
+    });
+
+    await expect(handleTurnProgressTerminal(ds, {
+      type: 'turn_terminal', sessionId: 'session-1', turnId: 'turn-1', dispatchAttempt: 1,
+      status: 'failed', errorCode: 'provider_failed',
+    }, eligible, deps)).resolves.toBeUndefined();
+    expect(ds.session.turnProgressBinding).toBeDefined();
+  });
+
   it('settles a terminal-only failure so the next execution unit can start', async () => {
     const ds = daemonSession();
     await handleTurnProgressFact(ds, {

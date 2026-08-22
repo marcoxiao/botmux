@@ -35,6 +35,7 @@ export type TurnProgressEventV1 =
   | { schemaVersion: 1; seq: number; kind: 'operation'; operation: NonNullable<TurnProgressFactV1['operation']> }
   | { schemaVersion: 1; seq: number; kind: 'waiting'; text: string }
   | { schemaVersion: 1; seq: number; kind: 'resumed' }
+  | { schemaVersion: 1; seq: number; kind: 'finalizing' }
   | { schemaVersion: 1; seq: number; kind: 'external_reply' }
   | { schemaVersion: 1; seq: number; kind: 'terminal'; status: TurnProgressTerminal; errorCode?: string };
 

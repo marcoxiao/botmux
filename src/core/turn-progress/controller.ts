@@ -403,8 +403,7 @@ export async function handleTurnProgressWaiting(
 ): Promise<void> {
   const host = await lifecycleHost(ds, turnId, eligibility, deps);
   if (!host) return;
-  const fallback = localeForBot(ds.larkAppId) === 'zh' ? '等待输入' : 'Waiting for input';
-  host.dispatch({ kind: 'waiting', text: cleanNarrative(ds, description) || fallback }, true);
+  host.dispatch({ kind: 'waiting', text: cleanNarrative(ds, description) }, true);
 }
 
 export async function handleTurnProgressResumed(
@@ -451,19 +450,22 @@ export async function handleTurnProgressTerminal(
   );
   if (ensured.kind !== 'ready') return;
   if (terminal.status === 'completed' && terminal.outputDisposition !== 'nothing_to_send') {
-    const text = localeForBot(ds.larkAppId) === 'zh' ? '正在确认结果' : 'Confirming the result';
-    ensured.host.dispatch({ kind: 'narrative', text }, true);
+    ensured.host.dispatch({ kind: 'finalizing' }, true);
     return;
   }
   const errorCode = terminal.errorCode && /^[A-Za-z0-9_.:-]{1,80}$/.test(terminal.errorCode)
     ? terminal.errorCode
     : undefined;
-  const delivery = await ensured.host.settleTerminal({
-    kind: 'terminal',
-    status: terminal.status,
-    ...(errorCode ? { errorCode } : {}),
-  });
-  if (delivery.kind === 'delivered') acknowledgeProgressFinal(ds, terminal.turnId);
+  try {
+    const delivery = await ensured.host.settleTerminal({
+      kind: 'terminal',
+      status: terminal.status,
+      ...(errorCode ? { errorCode } : {}),
+    });
+    if (delivery.kind === 'delivered') acknowledgeProgressFinal(ds, terminal.turnId);
+  } catch (error) {
+    diagnoseOnce(ds, 'terminal_settlement_failed', error);
+  }
 }
 
 export async function deliverFinalThroughProgressCard(

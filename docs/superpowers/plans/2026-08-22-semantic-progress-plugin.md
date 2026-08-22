@@ -116,6 +116,7 @@ export type TurnProgressEventV1 =
   | { schemaVersion: 1; seq: number; kind: 'operation'; operation: NonNullable<TurnProgressFactV1['operation']> }
   | { schemaVersion: 1; seq: number; kind: 'waiting'; text: string }
   | { schemaVersion: 1; seq: number; kind: 'resumed' }
+  | { schemaVersion: 1; seq: number; kind: 'finalizing' }
   | { schemaVersion: 1; seq: number; kind: 'external_reply' }
   | { schemaVersion: 1; seq: number; kind: 'terminal'; status: TurnProgressTerminal; errorCode?: string };
 
@@ -553,7 +554,7 @@ controller 必须：
 - create 明确失败或响应不明确且拿不到 `cardId` 时，把该 turn 加入 `turnProgressLegacyFallbackTurns` 并返回 `fallback`；未挂载 entity 不会产生用户可见双卡。调用方再调用现有 `postTurnStartingCard`，controller 不反向 import `worker-pool.ts`；
 - final update 成功只进入 `finalizing`，不得清 binding；Core 既有 dedupe/settlement 明确成功后才调用 `ackFinal()`；
 - terminal handler 延后一个 event-loop turn 处理，让同一 Worker 先发出的 `final_output` 有机会登记 final intent；host 已 `finalizing` 时 terminal 只记账、不覆盖 final；
-- failed/cancelled/ambiguous 且没有 final intent时冻结终态；completed 只有 `outputDisposition === 'nothing_to_send'` 或已有 external reply 时收口，裸 completed 只投递 narrative“正在确认结果”并保留 binding；
+- failed/cancelled/ambiguous 且没有 final intent时冻结终态；completed 只有 `outputDisposition === 'nothing_to_send'` 或已有 external reply 时收口，裸 completed 只投递 provider-neutral `finalizing` 并保留 binding，展示文案由插件决定；
 - 不包含卡片文案或 CLI 特判。
 
 - [ ] **Step 4: 在现有大文件只加短 tap**

@@ -170,7 +170,7 @@ Core 交给插件的 `TurnProgressEventV1` 由 `TurnProgressFactV1` 与现有事
 - `turn_progress` IPC 提供 started、narrative、operation；
 - `tui_prompt` / `tui_prompt_resolved` 提供 waiting/resumed；
 - `steer_accepted` 不进入 reducer，只把该补充消息的 turn ID 绑定为当前执行单元的成员别名；
-- `turn_terminal` 提供 completed/failed/cancelled/ambiguous 生命周期证据；failed/cancelled/ambiguous 在没有已开始的 final intent 时可冻结对应终态，completed 只有带 `outputDisposition = nothing_to_send` 或已有 `explicit_reply_observed` 时才证明“不会再有 canonical final”。裸 completed 可能只是 transcript hydration 先到，不能抢先清 binding；
+- `turn_terminal` 提供 completed/failed/cancelled/ambiguous 生命周期证据；failed/cancelled/ambiguous 在没有已开始的 final intent 时可冻结对应终态，completed 只有带 `outputDisposition = nothing_to_send` 或已有 `explicit_reply_observed` 时才证明“不会再有 canonical final”。裸 completed 可能只是 transcript hydration 先到，只投递 provider-neutral `finalizing`，不能抢先清 binding；
 - `final_output` 提供 canonical final delivery，不重新包装一份 terminal IPC。
 
 因此 Worker 不重复发送 waiting 或 terminal，插件协议也不要求 provider reader 复制已有生命周期。
@@ -219,7 +219,7 @@ Binding 作为 Session 的一个可选字段保存，不新建 sidecar store。�
 3. 现有 `tui_prompt` / `tui_prompt_resolved` 分支向同一 reducer 投递 waiting/resumed；
 4. 普通飞书 IM `final_output` 构建 canonical final card 后，请求 host 在原 card entity 完成交付；
 5. 明确成功后才沿用现有 dedupe、feedback persistence、turn settlement 与 `✅` reaction；明确永久失败才走现有 stable-UUID fresh-message 路径；
-6. `turn_terminal` 没有 canonical final 时，把 active 卡冻结为失败、取消或不明确终态；completed 仅在有 `nothing_to_send` 正证据时冻结为完成，已有 `explicit_reply_observed` 时显示“答复已通过独立消息发送”；裸 completed 保持“正在确认结果”，等待 final/recovery；
+6. `turn_terminal` 没有 canonical final 时，把 active 卡冻结为失败、取消或不明确终态；completed 仅在有 `nothing_to_send` 正证据时冻结为完成，已有 `explicit_reply_observed` 时显示插件定义的独立答复状态；裸 completed 投递 `finalizing`，由插件呈现并等待 final/recovery；
 7. 被插件接管后不再创建或 patch 旧 streaming card；CardKit entity 创建明确失败时，本轮立即退回现有 `postTurnStartingCard`/最终答复链路，避免双卡或悬空卡。
 
 统一的基础资格判断必须同时用于 start、progress 和 final：插件已在当前 session manifest 启用、普通飞书 IM、非 HTTP wait/async、非 doc comment、非 VC receiver/listener、非 substitute、非 managed/silent turn。Final 接管还要求不是 `suppressDelivery` 或 `steer_superseded`；前者由 `explicit_reply_observed`/terminal 将进度卡安全收口，后者继续等待同一 ordered-steer 执行单元的真实 final。特殊通道完全沿用旧链路。
