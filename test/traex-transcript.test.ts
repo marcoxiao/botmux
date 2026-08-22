@@ -235,6 +235,99 @@ describe('drainTraexRollout', () => {
     ]);
   });
 
+  it('emits bridge events and whitelisted progress facts in rollout line order', () => {
+    writeFileSync(path, [
+      line(user('inspect the implementation')),
+      line({
+        timestamp: '2000-01-01T00:00:01.100Z',
+        type: 'event_msg',
+        payload: { type: 'task_started', turn_id: 'turn-progress' },
+      }),
+      line(agentMessage('正在  <at user_id="secret">某人</at>\n检查实现\nBOTMUX_NOTHING_TO_SEND')),
+      line({
+        timestamp: '2000-01-01T00:00:02.100Z',
+        type: 'event_msg',
+        payload: { type: 'agent_reasoning_raw_content', text: 'private chain of thought' },
+      }),
+      line({
+        timestamp: '2000-01-01T00:00:02.200Z',
+        type: 'event_msg',
+        payload: {
+          type: 'exec_command_end', call_id: 'cmd-1', exit_code: 0,
+          command: 'printenv PRIVATE_TOKEN', output: 'private command output',
+        },
+      }),
+      line({
+        timestamp: '2000-01-01T00:00:02.300Z',
+        type: 'event_msg',
+        payload: {
+          type: 'patch_apply_end', call_id: 'patch-1', success: true,
+          changes: [
+            { path: 'src/index.ts' },
+            { path: 'README.md' },
+            { path: '../outside-workspace' },
+          ],
+          patch: 'private patch body',
+        },
+      }),
+      line({
+        timestamp: '2000-01-01T00:00:02.400Z',
+        type: 'event_msg',
+        payload: {
+          type: 'mcp_tool_call_end', call_id: 'mcp-1', tool_name: 'read_file', success: true,
+          invocation: { path: '/private/secret' }, result: 'private tool result',
+        },
+      }),
+      line(taskComplete('durable final answer')),
+    ].join(''));
+
+    const result = drainTraexRollout(path, 0, { workingDir: dir });
+    expect(result.orderedRecords.map(record => record.kind === 'bridge'
+      ? `bridge:${record.event.kind}`
+      : `progress:${record.fact.kind}`)).toEqual([
+      'bridge:user',
+      'progress:turn_started',
+      'progress:narrative',
+      'progress:operation',
+      'progress:operation',
+      'progress:operation',
+      'bridge:assistant_final',
+    ]);
+    expect(result.events).toEqual(result.orderedRecords.flatMap(record =>
+      record.kind === 'bridge' ? [record.event] : []));
+    expect(result.orderedRecords.filter(record => record.kind === 'progress').map(record =>
+      record.kind === 'progress' ? record.fact : undefined)).toEqual([
+      expect.objectContaining({ kind: 'turn_started' }),
+      expect.objectContaining({ kind: 'narrative', text: '正在 某人检查实现' }),
+      expect.objectContaining({
+        kind: 'operation',
+        operation: { id: 'cmd-1', type: 'command', phase: 'completed', outcome: 'succeeded' },
+      }),
+      expect.objectContaining({
+        kind: 'operation',
+        operation: {
+          id: 'patch-1', type: 'file_change', phase: 'completed',
+          subjects: ['src/index.ts', 'README.md'], outcome: 'succeeded',
+        },
+      }),
+      expect.objectContaining({
+        kind: 'operation',
+        operation: {
+          id: 'mcp-1', type: 'mcp', phase: 'completed',
+          subjects: ['read_file'], outcome: 'succeeded',
+        },
+      }),
+    ]);
+    const serialized = JSON.stringify(result.orderedRecords);
+    expect(serialized).not.toContain('printenv');
+    expect(serialized).not.toContain('private command output');
+    expect(serialized).not.toContain('private patch body');
+    expect(serialized).not.toContain('/private/secret');
+    expect(serialized).not.toContain('private tool result');
+    expect(serialized).not.toContain('chain of thought');
+    expect(serialized).not.toContain('BOTMUX_NOTHING_TO_SEND');
+  });
+
   it('ignores internal role=user injections without a user_message event', () => {
     writeFileSync(path, [
       line(userResponseItem('<environment_context>runtime context</environment_context>')),

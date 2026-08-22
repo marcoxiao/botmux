@@ -52,12 +52,21 @@ import {
 import { isInternalCodexSessionMeta } from './codex-session-meta.js';
 import { baselineJsonlCursor } from './jsonl-cursor.js';
 import { traeSessionsRoot } from './traex-paths.js';
+import {
+  normalizeTurnProgressFact,
+  type TurnProgressFactV1,
+} from '../core/turn-progress/protocol.js';
 
 export { splitCodexEventsByCutoff as splitTraexEventsByCutoff };
 export { extractLastCodexTurn as extractLastTraexTurn };
 export type { CodexBridgeEvent as TraexBridgeEvent };
 
+export type TraexOrderedRecord =
+  | { kind: 'bridge'; event: CodexBridgeEvent }
+  | { kind: 'progress'; fact: TurnProgressFactV1 };
+
 export interface TraexDrainResult extends CodexDrainResult {
+  orderedRecords: TraexOrderedRecord[];
   /** Latest executor-reported model observed in the drained complete records. */
   latestModel?: string;
   /** Latest executor-reported reasoning effort observed in complete records. */
@@ -76,6 +85,8 @@ export interface TraexDrainOptions {
    *  different offset and must not disturb the production drainer's pending
    *  turn state. */
   probe?: boolean;
+  /** Workspace boundary used to retain only safe relative patch paths. */
+  workingDir?: string;
 }
 
 export interface TraexRuntimeSnapshot {
@@ -186,6 +197,89 @@ function runtimeFromTraexEntry(entry: any): TraexRuntimeSnapshot | undefined {
   };
 }
 
+function traexOperationOutcome(payload: any): 'succeeded' | 'failed' | 'cancelled' {
+  const status = typeof payload?.status === 'string' ? payload.status.toLowerCase() : '';
+  if (status === 'cancelled' || status === 'canceled' || status === 'interrupted') return 'cancelled';
+  const exitCode = payload?.exit_code ?? payload?.exitCode;
+  if (status === 'failed' || status === 'error' || payload?.success === false
+      || payload?.error != null || typeof exitCode === 'number' && exitCode !== 0) return 'failed';
+  return 'succeeded';
+}
+
+function traexFileSubjects(payload: any): string[] {
+  const values = [
+    ...(Array.isArray(payload?.changes)
+      ? payload.changes.map((change: any) => change?.path ?? change?.file_path)
+      : []),
+    ...(Array.isArray(payload?.files)
+      ? payload.files.map((file: any) => typeof file === 'string' ? file : file?.path ?? file?.file_path)
+      : []),
+    payload?.path,
+    payload?.file_path,
+  ];
+  return values.filter((value): value is string => typeof value === 'string');
+}
+
+function traexProgressFact(
+  payload: any,
+  seq: number,
+  atMs: number,
+  workingDir: string,
+): TurnProgressFactV1 | null {
+  const base = { schemaVersion: 1 as const, seq, atMs };
+  if (payload.type === 'task_started') {
+    return normalizeTurnProgressFact({ ...base, kind: 'turn_started' }, workingDir);
+  }
+  if (payload.type === 'agent_message'
+      && payload.phase !== 'final_answer'
+      && typeof payload.message === 'string') {
+    const text = payload.message.replace(TRAEX_TRAILING_SENTINEL_RE, '');
+    return normalizeTurnProgressFact({
+      ...base,
+      kind: 'narrative',
+      text,
+    }, workingDir);
+  }
+
+  const operationBase = {
+    id: typeof payload.call_id === 'string' ? payload.call_id : undefined,
+    phase: 'completed' as const,
+    outcome: traexOperationOutcome(payload),
+  };
+  if (payload.type === 'exec_command_end') {
+    return normalizeTurnProgressFact({
+      ...base,
+      kind: 'operation',
+      operation: { ...operationBase, type: 'command' },
+    }, workingDir);
+  }
+  if (payload.type === 'patch_apply_end') {
+    return normalizeTurnProgressFact({
+      ...base,
+      kind: 'operation',
+      operation: {
+        ...operationBase,
+        type: 'file_change',
+        subjects: traexFileSubjects(payload),
+      },
+    }, workingDir);
+  }
+  if (payload.type === 'mcp_tool_call_end') {
+    const tool = [payload.tool_name, payload.tool, payload.name]
+      .find(value => typeof value === 'string');
+    return normalizeTurnProgressFact({
+      ...base,
+      kind: 'operation',
+      operation: {
+        ...operationBase,
+        type: 'mcp',
+        ...(tool ? { subjects: [tool] } : {}),
+      },
+    }, workingDir);
+  }
+  return null;
+}
+
 /** Incrementally drain complete TRAE rollout lines.
  *
  * `task_complete` is intentionally emitted even when last_agent_message is
@@ -210,12 +304,15 @@ export function drainTraexRollout(
 ): TraexDrainResult {
   const adoptMode = opts?.adoptMode === true;
   const probe = opts?.probe === true;
-  if (!existsSync(path)) return { events: [], newOffset: 0, pendingTail: '' };
+  const workingDir = opts?.workingDir ?? process.cwd();
+  if (!existsSync(path)) return { events: [], orderedRecords: [], newOffset: 0, pendingTail: '' };
   let size: number;
-  try { size = statSync(path).size; } catch { return { events: [], newOffset: fromOffset, pendingTail: '' }; }
+  try { size = statSync(path).size; } catch {
+    return { events: [], orderedRecords: [], newOffset: fromOffset, pendingTail: '' };
+  }
   let start = fromOffset;
   if (size < start) start = 0;
-  if (size === start) return { events: [], newOffset: start, pendingTail: '' };
+  if (size === start) return { events: [], orderedRecords: [], newOffset: start, pendingTail: '' };
 
   const buf = Buffer.alloc(size - start);
   const fd = openSync(path, 'r');
@@ -228,6 +325,7 @@ export function drainTraexRollout(
   const sourceSessionId = codexSessionIdFromRolloutPath(path);
 
   const events: CodexBridgeEvent[] = [];
+  const orderedRecords: TraexOrderedRecord[] = [];
   let latestModel: string | undefined;
   let latestReasoningEffort: string | undefined;
   let cursor = start;
@@ -250,12 +348,18 @@ export function drainTraexRollout(
       timestampMs: eventTimestampMs(obj.timestamp),
       ...(sourceSessionId ? { sourceSessionId } : {}),
     };
+    const fact = obj.type === 'event_msg'
+      ? traexProgressFact(payload, lineStart, base.timestampMs, workingDir)
+      : null;
+    if (fact) orderedRecords.push({ kind: 'progress', fact });
     if (obj.type === 'event_msg'
       && payload.type === 'user_message'
       && typeof payload.message === 'string') {
       const userText = payload.message;
       if (userText) {
-        events.push({ ...base, kind: 'user', text: userText });
+        const event = { ...base, kind: 'user' as const, text: userText };
+        events.push(event);
+        orderedRecords.push({ kind: 'bridge', event });
         // New turn: drop any agent_message state an unterminated predecessor
         // left behind so it can't be attributed to this turn.
         if (!probe) traexPendingAgentCache.delete(path);
@@ -306,7 +410,7 @@ export function drainTraexRollout(
             : '';
       }
       if (!probe) traexPendingAgentCache.delete(path);
-      events.push({
+      const event: CodexBridgeEvent = {
         ...base,
         kind: 'assistant_final',
         text,
@@ -319,7 +423,9 @@ export function drainTraexRollout(
           terminalErrorCode: codexTaskFailureCode(payload.error),
           terminalErrorSummary: safeFailureSummary(payload.error),
         } : {}),
-      });
+      };
+      events.push(event);
+      orderedRecords.push({ kind: 'bridge', event });
       continue;
     }
     // Observed cancellation records write `turn_aborted`
@@ -331,17 +437,20 @@ export function drainTraexRollout(
       && typeof payload.turn_id === 'string'
       && payload.turn_id.length > 0) {
       if (!probe) traexPendingAgentCache.delete(path);
-      events.push({
+      const event: CodexBridgeEvent = {
         ...base,
         kind: 'assistant_final',
         text: '',
         terminalStatus: 'ambiguous',
         terminalErrorCode: abortErrorCode(payload.reason),
-      });
+      };
+      events.push(event);
+      orderedRecords.push({ kind: 'bridge', event });
     }
   }
   return {
     events,
+    orderedRecords,
     newOffset,
     pendingTail,
     ...(latestModel ? { latestModel } : {}),

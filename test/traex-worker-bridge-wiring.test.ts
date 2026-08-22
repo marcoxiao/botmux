@@ -27,7 +27,9 @@ describe('TRAE worker structured-bridge wiring', () => {
     // adoptMode is threaded into the TRAE drainer so it does not synthesise a
     // bare sentinel in adopt mode (where transcript text is posted verbatim).
     expect(body).toContain('if (structuredBridgeIsTraex())');
-    expect(body).toContain('drainTraexRollout(path, offset, { adoptMode:');
+    expect(body).toContain('drainTraexRollout(path, offset, {');
+    expect(body).toContain('adoptMode: lastInitConfig?.adoptMode === true');
+    expect(body).toContain('workingDir: lastInitConfig?.workingDir');
   });
 
   it('publishes the latest TRAE runtime on attach and incremental ingest', () => {

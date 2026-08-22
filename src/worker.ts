@@ -188,6 +188,7 @@ import { CODEX_AUTH_ERROR_CODE, CODEX_CONNECTION_ERROR_CODE, CODEX_INVALID_REQUE
 import { CodexServiceTierTracker, resolveCodexServiceTierSnapshot } from './services/codex-service-tier.js';
 import { WORKER_IPC_HANDLER_READY_EVENT } from './worker-ipc-preload.js';
 import { drainTraexRollout, findTraexRolloutBySessionId, findTraexRolloutByPid, findTraexRolloutSetByPid, readLatestTraexRuntime, traexHistorySidIsOwned, type TraexDrainResult, type TraexRuntimeSnapshot } from './services/traex-transcript.js';
+import { TraexProgressRouter } from './services/traex-progress-router.js';
 import { parseTraexUserInputQuestions } from './services/traex-user-input.js';
 import { cocoEventsPathForSession, drainCocoEvents, findCocoSessionByPid } from './services/coco-transcript.js';
 import { currentHermesStateOffset, drainHermesStateDb, resolveHermesStateDbPath } from './services/hermes-transcript.js';
@@ -4118,6 +4119,16 @@ let codexBridgeBaselineDone = false;
 let publishedActiveRuntime: TraexRuntimeSnapshot = {};
 let activeRuntimePublished = false;
 const codexBridgeQueue = new CodexBridgeQueue();
+const traexProgressRouter = new TraexProgressRouter(codexBridgeQueue, (owner, fact) => {
+  if (lastInitConfig?.cliId !== 'traex') return;
+  send({
+    type: 'turn_progress',
+    sessionId: lastInitConfig.sessionId,
+    turnId: owner.turnId,
+    ...(owner.dispatchAttempt !== undefined ? { dispatchAttempt: owner.dispatchAttempt } : {}),
+    fact,
+  });
+});
 let codexBridgeWatcher: FSWatcher | null = null;
 let codexBridgeTimer: NodeJS.Timeout | null = null;
 let ompBridgeState: OmpTranscriptState = {};
@@ -5783,7 +5794,10 @@ function structuredBridgeIngestPath(
   // adoptMode gates the drainer's bare-sentinel synthesis: adopt posts
   // transcript text verbatim, so a synthesised token would leak into Lark.
   if (structuredBridgeIsTraex()) {
-    return drainTraexRollout(path, offset, { adoptMode: lastInitConfig?.adoptMode === true });
+    return drainTraexRollout(path, offset, {
+      adoptMode: lastInitConfig?.adoptMode === true,
+      workingDir: lastInitConfig?.workingDir,
+    });
   }
   if (codexBridgeIsCursor()) return drainCursorTranscript(path, offset);
   if (structuredBridgeIsPi()) return drainPiTranscript(path, offset);
@@ -6043,8 +6057,20 @@ function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'bas
     const result = structuredBridgeIngestPath(rolloutPath, 0);
     const cutoff = (codexAdoptStartMs ?? Date.now()) - 5_000;
     const { history, live } = splitCodexEventsByCutoff(result.events, cutoff);
-    codexBridgeQueue.absorb(history);
-    codexBridgeQueue.ingest(live);
+    if (structuredBridgeIsTraex()) {
+      const traex = result as TraexDrainResult;
+      const historyUuids = new Set(history.map(event => event.uuid));
+      for (const record of traex.orderedRecords) {
+        if (record.kind === 'bridge' && historyUuids.has(record.event.uuid)) {
+          codexBridgeQueue.absorb([record.event]);
+        } else if (record.kind === 'bridge' || record.fact.atMs >= cutoff) {
+          traexProgressRouter.ingest([record]);
+        }
+      }
+    } else {
+      codexBridgeQueue.absorb(history);
+      codexBridgeQueue.ingest(live);
+    }
     pruneExpiredStructuredHeadsAndEmit('structured split-live attach');
     // Late attach can discover an already-completed live turn in the same
     // drain. Re-drive prompt readiness from that terminal event immediately;
@@ -6191,6 +6217,7 @@ function codexBridgeDetachFile(): void {
   codexBridgeOffset = 0;
   codexBridgePendingTail = '';
   codexBridgeBaselineDone = false;
+  if (structuredBridgeIsTraex()) traexProgressRouter.clear();
   ompBridgeState = {};
   ompQuietCandidateKey = undefined;
   ompQuietCandidateCompleteOffset = undefined;
@@ -6584,7 +6611,11 @@ function codexBridgeIngest(opts: {
     maybeEmitCodexStructuredRateLimit(result.events);
   }
   if (result.events.length > 0) lastStructuredBridgeActivityAtMs = Date.now();
-  codexBridgeQueue.ingest(result.events);
+  if (structuredBridgeIsTraex()) {
+    traexProgressRouter.ingest((result as TraexDrainResult).orderedRecords);
+  } else {
+    codexBridgeQueue.ingest(result.events);
+  }
   // After ingest so the latch's delivery re-kick observes the started turn —
   // the flush's own bridge mark must queue behind it, not ahead of it.
   noteSpawnArgvTurnStartTranscriptEvidence(result.events);
@@ -7224,6 +7255,7 @@ function stopCodexBridge(): void {
   mtrBridgeOffset = 0;
   mtrBridgeBaselineDone = false;
   codexBridgeQueue.clearPending();
+  traexProgressRouter.clear();
   codexBridgeQueue.setLocalTurns(false);
   codexBridgePendingSessionId = undefined;
   codexAdoptPendingPid = undefined;
