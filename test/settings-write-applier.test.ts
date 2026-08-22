@@ -30,6 +30,7 @@ function makeDeps(overrides: Partial<SettingsWriteApplierDeps> = {}): SettingsWr
     codexNotifier: {
       enabled: false,
       targetBotAppId: null,
+      targetChatId: null,
       notifyWhen: 'locked_only',
       platformSupported: true,
       hookInstalled: false,
@@ -364,6 +365,70 @@ describe('applySettingsWrite happy paths', () => {
     expect(deps.writeCodexNotifierConfig).toHaveBeenCalledWith({
       targetBotAppId: 'cli_notify',
     });
+  });
+
+  it('revalidates target chat membership before saving', async () => {
+    const validate = vi.fn(async (
+      _appId: string,
+      options?: { requireReady?: boolean; targetChatId?: string },
+    ) => options?.targetChatId === 'oc_member'
+      ? { ok: true as const }
+      : { ok: false as const, error: 'codexNotifier_target_chat_unavailable' });
+    const deps = makeDeps({ validateCodexNotifierTargetBotAppId: validate });
+
+    const r = await applySettingsWrite({
+      codexNotifier: { targetBotAppId: 'cli_notify', targetChatId: ' oc_member ' },
+    }, deps);
+
+    expect(r.ok).toBe(true);
+    expect(validate).toHaveBeenCalledWith('cli_notify', {
+      requireReady: true,
+      targetChatId: 'oc_member',
+    });
+    expect(deps.writeCodexNotifierConfig).toHaveBeenCalledWith({
+      targetBotAppId: 'cli_notify',
+      targetChatId: 'oc_member',
+    });
+  });
+
+  it('does not persist a target chat that the selected bot cannot access', async () => {
+    const deps = makeDeps({
+      validateCodexNotifierTargetBotAppId: vi.fn(async () => ({
+        ok: false as const,
+        error: 'codexNotifier_target_chat_unavailable',
+      })),
+    });
+
+    const r = await applySettingsWrite({
+      codexNotifier: { targetBotAppId: 'cli_notify', targetChatId: 'oc_outside' },
+    }, deps);
+
+    expect(r).toEqual({ ok: false, error: 'codexNotifier_target_chat_unavailable' });
+    expect(deps.writeCodexNotifierConfig).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed target chat ids before validation or persistence', async () => {
+    const deps = makeDeps();
+
+    const r = await applySettingsWrite({
+      codexNotifier: { targetChatId: 'x'.repeat(257) },
+    }, deps);
+
+    expect(r).toEqual({ ok: false, error: 'invalid_codexNotifier_targetChatId' });
+    expect(deps.validateCodexNotifierTargetBotAppId).not.toHaveBeenCalled();
+    expect(deps.writeCodexNotifierConfig).not.toHaveBeenCalled();
+  });
+
+  it('requires a notification bot before accepting a group destination', async () => {
+    const deps = makeDeps();
+
+    const r = await applySettingsWrite({
+      codexNotifier: { targetChatId: 'oc_member' },
+    }, deps);
+
+    expect(r).toEqual({ ok: false, error: 'codexNotifier_target_required' });
+    expect(deps.validateCodexNotifierTargetBotAppId).not.toHaveBeenCalled();
+    expect(deps.writeCodexNotifierConfig).not.toHaveBeenCalled();
   });
 
   it('validates the target and installs the Hook before enabling codexNotifier', async () => {

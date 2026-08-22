@@ -2,6 +2,7 @@ import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { DropdownMenu, FieldTitle, LoadingState, dropdownLabel } from './dashboard-components.js';
 import { VcConsumerProfilesGate } from './vc-consumer-profiles-section.js';
+import { fetchGroupsSnapshot } from './groups-api.js';
 import { useT } from './react-hooks.js';
 import { mountReactPage, type PageDisposer } from './react-mount.js';
 import { store } from './store.js';
@@ -30,6 +31,7 @@ interface DashboardSettings {
   codexNotifier: {
     enabled: boolean;
     targetBotAppId: string | null;
+    targetChatId: string | null;
     notifyWhen: 'locked_only' | 'always';
     platformSupported: boolean;
     hookInstalled: boolean;
@@ -45,6 +47,7 @@ interface DashboardSettings {
       recipientConfigured: boolean;
       recipientVerified: boolean;
       recipientHint: string | null;
+      regularGroupMentionMode: 'always' | 'topic' | 'never' | 'ambient';
     }>;
     targetDaemonOnline: boolean;
     pendingCount: number;
@@ -190,6 +193,9 @@ function parseSettings(s: any): DashboardSettings {
       enabled: s?.codexNotifier?.enabled === true,
       targetBotAppId: typeof s?.codexNotifier?.targetBotAppId === 'string'
         ? s.codexNotifier.targetBotAppId
+        : null,
+      targetChatId: typeof s?.codexNotifier?.targetChatId === 'string'
+        ? s.codexNotifier.targetChatId
         : null,
       notifyWhen: s?.codexNotifier?.notifyWhen === 'always' ? 'always' : 'locked_only',
       platformSupported: s?.codexNotifier?.platformSupported === true,
@@ -740,7 +746,7 @@ function SettingsBody(props: {
       s => ({ ...s, herdrTraexPlugin: { ...s.herdrTraexPlugin, ...patch } }),
     );
   };
-  const saveCodexNotifier = (patch: Partial<Pick<DashboardSettings['codexNotifier'], 'enabled' | 'targetBotAppId' | 'notifyWhen'>>) => {
+  const saveCodexNotifier = (patch: Partial<Pick<DashboardSettings['codexNotifier'], 'enabled' | 'targetBotAppId' | 'targetChatId' | 'notifyWhen'>>) => {
     return props.onSave(
       'codexNotifier',
       { codexNotifier: patch },
@@ -1166,16 +1172,29 @@ function SettingsBlock(props: {
   );
 }
 
+type CodexNotifierGroupOption = { chatId: string; name: string };
+
+async function loadCodexNotifierGroups(appId: string): Promise<CodexNotifierGroupOption[]> {
+  const snapshot = await fetchGroupsSnapshot({ force: true });
+  return snapshot.chats
+    .filter(chat => chat.memberBots.some(bot => bot.larkAppId === appId && bot.inChat))
+    .map(chat => ({ chatId: chat.chatId, name: chat.name?.trim() ?? '' }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export function CodexNotifierSettingsEditor(props: {
   value: DashboardSettings['codexNotifier'];
   disabled: boolean;
   saving: boolean;
   onSave(
-    patch: Partial<Pick<DashboardSettings['codexNotifier'], 'enabled' | 'targetBotAppId' | 'notifyWhen'>>,
+    patch: Partial<Pick<DashboardSettings['codexNotifier'], 'enabled' | 'targetBotAppId' | 'targetChatId' | 'notifyWhen'>>,
   ): Promise<void> | void;
+  loadGroups?: (appId: string) => Promise<CodexNotifierGroupOption[]>;
 }) {
   const tr = useT();
   const [enableRequested, setEnableRequested] = useState(false);
+  const [groups, setGroups] = useState<CodexNotifierGroupOption[]>([]);
+  const [groupsState, setGroupsState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const autoEnableStartedRef = useRef(false);
   const botOptions = useMemo(() => [
     { value: '', label: tr('settings.codexNotifierTargetPlaceholder') },
@@ -1200,6 +1219,50 @@ export function CodexNotifierSettingsEditor(props: {
     || (!props.value.platformSupported && props.value.notifyWhen === 'locked_only');
   const showDetails = props.value.enabled || enableRequested;
   const controlsDisabled = props.disabled || props.saving;
+  const groupOptions = useMemo(() => {
+    const options = [
+      { value: '', label: tr('settings.codexNotifierDestinationDm') },
+      ...groups.map(group => ({
+        value: group.chatId,
+        label: group.name || tr('settings.codexNotifierDestinationUnnamed'),
+      })),
+    ];
+    if (
+      props.value.targetChatId
+      && !groups.some(group => group.chatId === props.value.targetChatId)
+    ) {
+      options.push({
+        value: props.value.targetChatId,
+        label: tr('settings.codexNotifierDestinationUnavailable'),
+      });
+    }
+    return options;
+  }, [groups, props.value.targetChatId, tr]);
+
+  useEffect(() => {
+    if (!showDetails || !props.value.targetBotAppId) {
+      setGroups([]);
+      setGroupsState('idle');
+      return;
+    }
+    let cancelled = false;
+    setGroups([]);
+    setGroupsState('loading');
+    const loader = props.loadGroups ?? loadCodexNotifierGroups;
+    void loader(props.value.targetBotAppId).then(
+      nextGroups => {
+        if (cancelled) return;
+        setGroups(nextGroups);
+        setGroupsState('ready');
+      },
+      () => {
+        if (cancelled) return;
+        setGroups([]);
+        setGroupsState('failed');
+      },
+    );
+    return () => { cancelled = true; };
+  }, [props.loadGroups, props.value.targetBotAppId, showDetails]);
 
   useEffect(() => {
     if (!enableRequested || props.value.enabled || enableBlocked) {
@@ -1259,13 +1322,37 @@ export function CodexNotifierSettingsEditor(props: {
               value={props.value.targetBotAppId ?? ''}
               label={dropdownLabel(botOptions, props.value.targetBotAppId ?? '')}
               options={botOptions}
-              onChange={value => { void props.onSave({ targetBotAppId: value || null }); }}
+              onChange={value => {
+                void props.onSave({ targetBotAppId: value || null, targetChatId: null });
+              }}
             />
           </div>
           {selectedBot?.recipientHint ? (
             <p className="settings-subfield-hint">
               {tr('settings.codexNotifierRecipient', { recipient: selectedBot.recipientHint })}
             </p>
+          ) : null}
+          <div className="settings-field-row">
+            <FieldTitle help={tr('settings.codexNotifierDestinationHelp')}>
+              {tr('settings.codexNotifierDestination')}
+            </FieldTitle>
+            <DropdownMenu
+              className="settings-field-menu"
+              ariaLabel={tr('settings.codexNotifierDestination')}
+              disabled={controlsDisabled || !props.value.targetBotAppId}
+              value={props.value.targetChatId ?? ''}
+              label={dropdownLabel(groupOptions, props.value.targetChatId ?? '')}
+              options={groupOptions}
+              onChange={value => { void props.onSave({ targetChatId: value || null }); }}
+            />
+          </div>
+          {groupsState === 'loading' ? (
+            <p className="settings-subfield-hint">{tr('settings.codexNotifierGroupsLoading')}</p>
+          ) : groupsState === 'failed' ? (
+            <p className="hint-warn-inline">{tr('settings.codexNotifierGroupsLoadFailed')}</p>
+          ) : null}
+          {props.value.targetChatId && selectedBot?.regularGroupMentionMode !== 'topic' ? (
+            <p className="hint-warn-inline">{tr('settings.codexNotifierTopicMentionWarning')}</p>
           ) : null}
           <div className="settings-field-row">
             <FieldTitle help={tr('settings.codexNotifierNotifyWhenHelp')}>{tr('settings.codexNotifierNotifyWhen')}</FieldTitle>

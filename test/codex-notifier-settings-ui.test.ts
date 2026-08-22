@@ -6,11 +6,13 @@ import { CodexNotifierSettingsEditor } from '../src/dashboard/web/settings-page.
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 type EditorValue = ComponentProps<typeof CodexNotifierSettingsEditor>['value'];
+const pendingGroups = () => new Promise<Array<{ chatId: string; name: string }>>(() => undefined);
 
 function configuredValue(overrides: Partial<EditorValue> = {}): EditorValue {
   return {
     enabled: false,
     targetBotAppId: 'cli_target',
+    targetChatId: null,
     notifyWhen: 'always',
     platformSupported: true,
     hookInstalled: true,
@@ -25,6 +27,7 @@ function configuredValue(overrides: Partial<EditorValue> = {}): EditorValue {
       recipientConfigured: true,
       recipientVerified: true,
       recipientHint: 'ou_7f3a…c921',
+      regularGroupMentionMode: 'topic',
     }],
     targetDaemonOnline: true,
     pendingCount: 0,
@@ -37,6 +40,7 @@ function configuredValue(overrides: Partial<EditorValue> = {}): EditorValue {
 function renderEditor(
   value: EditorValue = configuredValue(),
   onSave = vi.fn(async () => undefined),
+  loadGroups = pendingGroups,
 ) {
   let renderer!: TestRenderer.ReactTestRenderer;
   act(() => {
@@ -45,6 +49,7 @@ function renderEditor(
       disabled: false,
       saving: false,
       onSave,
+      loadGroups,
     }));
   });
   return { renderer, onSave };
@@ -52,7 +57,7 @@ function renderEditor(
 
 function menus(renderer: TestRenderer.ReactTestRenderer) {
   return renderer.root.findAllByType('summary')
-    .filter(summary => ['通知 Bot', '通知时机'].includes(summary.props['aria-label']));
+    .filter(summary => ['通知 Bot', '通知位置', '通知时机'].includes(summary.props['aria-label']));
 }
 
 function toggle(renderer: TestRenderer.ReactTestRenderer) {
@@ -84,7 +89,7 @@ describe('CodexNotifierSettingsEditor', () => {
 
     expect(onSave).not.toHaveBeenCalled();
     expect(toggle(renderer).props.checked).toBe(true);
-    expect(menus(renderer)).toHaveLength(2);
+    expect(menus(renderer)).toHaveLength(3);
     const labels = menus(renderer)
       .map(menu => menu.findByProps({ className: 'sect-sort-value' }).children.join(''));
     expect(labels).toContain('Codex 助理 · codex');
@@ -122,6 +127,7 @@ describe('CodexNotifierSettingsEditor', () => {
         disabled: false,
         saving: false,
         onSave,
+        loadGroups: pendingGroups,
       }));
     });
 
@@ -143,6 +149,7 @@ describe('CodexNotifierSettingsEditor', () => {
         disabled: false,
         saving: false,
         onSave: vi.fn(async () => undefined),
+        loadGroups: pendingGroups,
       }));
     });
 
@@ -171,6 +178,7 @@ describe('CodexNotifierSettingsEditor', () => {
         disabled: false,
         saving: false,
         onSave: vi.fn(async () => undefined),
+        loadGroups: pendingGroups,
       }));
     });
     expect(JSON.stringify(renderer.toJSON())).toContain('BotMux Hook 已被 Codex 禁用');
@@ -187,6 +195,7 @@ describe('CodexNotifierSettingsEditor', () => {
         disabled: false,
         saving: false,
         onSave: vi.fn(async () => undefined),
+        loadGroups: pendingGroups,
       }));
     });
     expect(JSON.stringify(renderer.toJSON())).toContain('暂时无法读取 Codex Hook 状态');
@@ -257,9 +266,10 @@ describe('CodexNotifierSettingsEditor', () => {
         disabled: false,
         saving: false,
         onSave,
+        loadGroups: pendingGroups,
       }));
     });
-    expect(menus(renderer)).toHaveLength(2);
+    expect(menus(renderer)).toHaveLength(3);
 
     act(() => {
       toggle(renderer).props.onChange({ currentTarget: { checked: false } });
@@ -272,8 +282,72 @@ describe('CodexNotifierSettingsEditor', () => {
         disabled: false,
         saving: false,
         onSave,
+        loadGroups: pendingGroups,
       }));
     });
     expect(menus(renderer)).toHaveLength(0);
+  });
+
+  it('loads selectable groups and warns when topic replies still require an @mention', async () => {
+    const loadGroups = vi.fn(async () => [{ chatId: 'oc_workbench', name: '马仔工作台' }]);
+    const onSave = vi.fn(async () => undefined);
+    const { renderer } = renderEditor(configuredValue({
+      enabled: true,
+      targetChatId: 'oc_workbench',
+      botOptions: [{
+        ...configuredValue().botOptions[0],
+        regularGroupMentionMode: 'always',
+      }],
+    }), onSave, loadGroups);
+
+    await act(async () => undefined);
+
+    const rendered = JSON.stringify(renderer.toJSON());
+    expect(loadGroups).toHaveBeenCalledWith('cli_target');
+    expect(rendered).toContain('通知位置');
+    expect(rendered).toContain('马仔工作台');
+    expect(rendered).toContain('仅话题内不需要 @');
+    expect(rendered).not.toContain('oc_workbench');
+  });
+
+  it('clears the old group in the same save when switching notification bots', async () => {
+    const onSave = vi.fn(async () => undefined);
+    const secondBot = {
+      ...configuredValue().botOptions[0],
+      larkAppId: 'cli_second',
+      botName: 'Codex 二号',
+    };
+    const { renderer } = renderEditor(configuredValue({
+      enabled: true,
+      targetChatId: 'oc_old',
+      botOptions: [...configuredValue().botOptions, secondBot],
+    }), onSave);
+    await act(async () => undefined);
+
+    const botMenu = renderer.root.findAllByType('summary')
+      .find(summary => summary.props['aria-label'] === '通知 Bot')!;
+    const nextBot = botMenu.parent!.findAllByType('button')
+      .find(button => JSON.stringify(button.props.children).includes('Codex 二号'))!;
+    act(() => { nextBot.props.onClick(); });
+
+    expect(onSave).toHaveBeenCalledWith({
+      targetBotAppId: 'cli_second',
+      targetChatId: null,
+    });
+  });
+
+  it('keeps an existing group visible when live group loading fails', async () => {
+    const loadGroups = vi.fn(async () => { throw new Error('offline'); });
+    const { renderer } = renderEditor(configuredValue({
+      enabled: true,
+      targetChatId: 'oc_existing',
+    }), vi.fn(async () => undefined), loadGroups);
+
+    await act(async () => undefined);
+
+    const rendered = JSON.stringify(renderer.toJSON());
+    expect(rendered).toContain('已配置群聊（当前不可用）');
+    expect(rendered).toContain('群列表加载失败');
+    expect(rendered).not.toContain('oc_existing');
   });
 });

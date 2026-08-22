@@ -853,6 +853,7 @@ interface ResolvedDashboardSettings {
   codexNotifier: {
     enabled: boolean;
     targetBotAppId: string | null;
+    targetChatId: string | null;
     notifyWhen: 'locked_only' | 'always';
     platformSupported: boolean;
     hookInstalled: boolean;
@@ -864,6 +865,7 @@ interface ResolvedDashboardSettings {
       recipientConfigured: boolean;
       recipientVerified: boolean;
       recipientHint: string | null;
+      regularGroupMentionMode: 'always' | 'topic' | 'never' | 'ambient';
     }>;
     targetDaemonOnline: boolean;
     pendingCount: number;
@@ -975,7 +977,7 @@ async function validateVcMeetingListenerBotAppId(appId: string): Promise<{ ok: t
 
 async function validateCodexNotifierTargetBotAppId(
   appId: string,
-  options: { requireReady?: boolean } = {},
+  options: { requireReady?: boolean; targetChatId?: string } = {},
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const bot = loadBotConfigs().find(candidate => candidate.larkAppId === appId);
@@ -992,6 +994,21 @@ async function validateCodexNotifierTargetBotAppId(
     const resolvedOwners = daemon.resolvedAllowedUsers ?? [];
     if (!hasResolvedCodexNotifierRecipient(resolvedOwners)) {
       return { ok: false, error: 'codexNotifier_target_owner_unverified' };
+    }
+    if (options.targetChatId) {
+      try {
+        const response = await fetchDaemonIpc(
+          daemon.ipcPort,
+          `/api/groups/${encodeURIComponent(options.targetChatId)}/membership`,
+          { signal: AbortSignal.timeout(5_000) },
+        );
+        const body = await response.json().catch(() => ({})) as { inChat?: unknown };
+        if (response.ok && body.inChat === true) return { ok: true };
+      } catch {
+        // A live membership probe is authoritative. Any transport or daemon
+        // error means the destination cannot be safely persisted right now.
+      }
+      return { ok: false, error: 'codexNotifier_target_chat_unavailable' };
     }
     return { ok: true };
   } catch {
@@ -1010,6 +1027,7 @@ function codexNotifierBotOptions(): ResolvedDashboardSettings['codexNotifier']['
           larkAppId: bot.larkAppId,
           botName: bot.displayName ?? onlineByAppId.get(bot.larkAppId)?.botName ?? bot.name ?? null,
           cliId: onlineByAppId.get(bot.larkAppId)?.cliId ?? bot.cliId,
+          regularGroupMentionMode: bot.regularGroupMentionMode ?? 'always',
           ...resolveCodexNotifierRecipientView(bot.allowedUsers, resolvedOwners),
         };
       });
@@ -1518,6 +1536,7 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
     codexNotifier: {
       enabled: codexNotifier.enabled,
       targetBotAppId: codexNotifier.targetBotAppId ?? null,
+      targetChatId: codexNotifier.targetChatId ?? null,
       notifyWhen: codexNotifier.notifyWhen,
       platformSupported: process.platform === 'darwin',
       hookInstalled: isCodexNotifierHookInstalled(),

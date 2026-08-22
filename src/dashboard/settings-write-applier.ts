@@ -54,6 +54,7 @@ export interface ResolvedDashboardSettingsView {
   codexNotifier: {
     enabled: boolean;
     targetBotAppId: string | null;
+    targetChatId: string | null;
     notifyWhen: 'locked_only' | 'always';
     platformSupported: boolean;
     hookInstalled: boolean;
@@ -69,6 +70,7 @@ export interface ResolvedDashboardSettingsView {
       recipientConfigured: boolean;
       recipientVerified: boolean;
       recipientHint: string | null;
+      regularGroupMentionMode: 'always' | 'topic' | 'never' | 'ambient';
     }>;
     targetDaemonOnline?: boolean;
     pendingCount?: number;
@@ -163,10 +165,10 @@ export interface SettingsWriteApplierDeps {
   validateVcMeetingListenerBotAppId?: (appId: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   /** Sync per-bot meeting-listener config after validation passes or when clearing the selection. */
   syncVcMeetingListenerBotConfig?: (listenerBotAppId: string | null, previousListenerBotAppId?: string | null) => Promise<{ ok: true } | { ok: false; error: string; feishuLoginQr?: string }>;
-  /** 校验通知 Bot；保存关闭态配置时只校验静态配置，启用时再要求 daemon 与收件人就绪。 */
+  /** 校验通知 Bot；启用通知或选择群目标时要求 daemon、收件人与群成员关系均就绪。 */
   validateCodexNotifierTargetBotAppId?: (
     appId: string,
-    options?: { requireReady?: boolean },
+    options?: { requireReady?: boolean; targetChatId?: string },
   ) => Promise<{ ok: true } | { ok: false; error: string }>;
   /** 校验过载告警通知 Bot：拒 unknown / apiOnly / 无可解析管理员收件人；启用时
    *  额外要求目标 daemon 在线(否则告警发不出)。复用管理员解析但无 codex-only 约束。 */
@@ -232,10 +234,12 @@ export type ApplySettingsWriteError =
   | 'invalid_codexNotifier'
   | 'invalid_codexNotifier_enabled'
   | 'invalid_codexNotifier_targetBotAppId'
+  | 'invalid_codexNotifier_targetChatId'
   | 'invalid_codexNotifier_notifyWhen'
   | 'codexNotifier_target_required'
   | 'codexNotifier_target_unknown'
   | 'codexNotifier_target_owner_missing'
+  | 'codexNotifier_target_chat_unavailable'
   | 'codexNotifier_platform_unsupported'
   | 'codexNotifier_hook_install_failed'
   | 'codexNotifier_mixed_patch_unsupported'
@@ -449,22 +453,50 @@ export async function applySettingsWrite(
         return { ok: false, error: 'invalid_codexNotifier_targetBotAppId' };
       }
     }
+    if ('targetChatId' in incoming) {
+      if (incoming.targetChatId === null || incoming.targetChatId === '') {
+        delete next.targetChatId;
+      } else if (
+        typeof incoming.targetChatId === 'string'
+        && incoming.targetChatId.trim()
+        && incoming.targetChatId.trim().length <= 256
+      ) {
+        next.targetChatId = incoming.targetChatId.trim();
+      } else {
+        return { ok: false, error: 'invalid_codexNotifier_targetChatId' };
+      }
+    }
     if ('notifyWhen' in incoming) {
       if (incoming.notifyWhen !== 'locked_only' && incoming.notifyWhen !== 'always') {
         return { ok: false, error: 'invalid_codexNotifier_notifyWhen' };
       }
       next.notifyWhen = incoming.notifyWhen;
     }
-    if (!('enabled' in incoming) && !('targetBotAppId' in incoming) && !('notifyWhen' in incoming)) {
+    if (
+      !('enabled' in incoming)
+      && !('targetBotAppId' in incoming)
+      && !('targetChatId' in incoming)
+      && !('notifyWhen' in incoming)
+    ) {
       return { ok: false, error: 'invalid_codexNotifier' };
     }
+    const targetChatChanged = 'targetChatId' in incoming;
     const shouldValidateCodexNotifierTarget = 'targetBotAppId' in incoming
+      || (targetChatChanged && !!next.targetChatId)
       || ('enabled' in incoming && incoming.enabled === true);
     if (next.targetBotAppId && shouldValidateCodexNotifierTarget && deps.validateCodexNotifierTargetBotAppId) {
-      const validation = await deps.validateCodexNotifierTargetBotAppId(next.targetBotAppId, {
-        requireReady: next.enabled === true,
-      });
+      const validationOptions: { requireReady?: boolean; targetChatId?: string } = {
+        requireReady: next.enabled === true || !!next.targetChatId,
+      };
+      if (next.targetChatId) validationOptions.targetChatId = next.targetChatId;
+      const validation = await deps.validateCodexNotifierTargetBotAppId(
+        next.targetBotAppId,
+        validationOptions,
+      );
       if (!validation.ok) return { ok: false, error: validation.error || 'codexNotifier_target_unknown' };
+    }
+    if (next.targetChatId && !next.targetBotAppId) {
+      return { ok: false, error: 'codexNotifier_target_required' };
     }
     if (next.enabled === true) {
       if (!next.targetBotAppId) return { ok: false, error: 'codexNotifier_target_required' };
