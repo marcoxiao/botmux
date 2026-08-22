@@ -35,7 +35,11 @@ origin: https://github.com/marcoxiao/botmux.git
 - 后续功能通过短期分支或 worktree 开发，验证后合入 `codex-office`；
 - 不把旧 `codex-feishu-native` 的提交历史合并进来。
 
-第一阶段原则上不改 BotMux 产品代码。若真实接入发现上游缺陷，先形成可复现测试，再以独立修复提交处理，禁止把部署配置硬编码进源码。
+第一阶段不改 BotMux 产品代码。若真实接入发现上游缺陷，本次切换先暂停；形成最小复现和测试后，再单独决定回退、等待上游或提交通用修复，禁止为了赶上线把补丁和部署配置塞进源码。
+
+后续个人能力先复用 BotMux 原生配置和能力；需要自行开发时，默认放入独立的 `extensions/codex-office/` BotMux 插件包，由它按需贡献 Skill、MCP、CLI、Dashboard 或独立 service。纯提示与方法论只做 Skill；需要确定性读写飞书或 Obsidian 时做 MCP；没有独立生命周期需求就不建 service。插件只能依赖 BotMux 已公布的 manifest 和运行协议，不直接 import `src/` 私有模块。
+
+当前插件契约尚未提供通用的飞书入站事件订阅和卡片 action 注册接口，因此“最终卡片增加个人按钮”不能假装成纯插件能力。只有确认该能力确实必要、且缺口对所有 BotMux 用户都成立时，才允许增加极小、通用、可回馈上游的核心扩展点；个人办公业务仍留在插件内。核心扩展与插件必须分开提交，保证日后合并上游时冲突面最小。
 
 ## 4. 运行架构
 
@@ -47,7 +51,7 @@ BotMux daemon
     ├── 飞书消息、话题与卡片
     ├── Session 生命周期与持久化
     ├── Dashboard / Web Terminal
-    └── Codex Agent CLI / App Server RPC
+    └── Codex App adapter / App Server RPC
             │
             ▼
         本机原生 Codex 登录与会话
@@ -59,14 +63,15 @@ BotMux daemon
 2. 同一时刻只能有一个事件消费者控制该应用。BotMux 启动前必须停止 `com.local.codex-feishu-native`。
 3. BotMux 使用自身的 `~/.botmux` 配置、状态和日志；不读取或迁移旧 Bridge 的状态文件。
 4. Codex 继续使用 `~/.codex` 原生登录、配置和会话；不得复制或删除 Codex token。
-5. Dashboard 和 Web Terminal 首次上线只允许本机访问，不配置公网暴露。
+5. Dashboard 和 Web Terminal 的上游默认 bind host 是 `0.0.0.0`，且 Dashboard 默认允许匿名只读访问；首次上线必须显式设置 `WEB_HOST=127.0.0.1`、`BOTMUX_DASHBOARD_HOST=127.0.0.1` 和 `BOTMUX_DASHBOARD_PUBLIC_READONLY=false`，并关闭 remote access，不配置公网暴露。
 6. 首次真机任务限定在明确的工作目录内；未通过权限审计前不扩大到整个主目录。
+7. `codex-office` 的运行配置、插件私有配置和构建产物分别进入 `~/.botmux` 与插件 `dist/`，不修改上游源码路径；插件开发态通过 `botmux plugin install ./extensions/codex-office --link` 接入，发布态使用固定版本安装。
 
 ## 5. 身份、凭证与权限
 
 ### 5.1 飞书应用
 
-BotMux 需要当前应用的 App ID 与 App Secret。App Secret 只通过本机隐藏输入进入 BotMux，不通过聊天、命令行参数、Git、日志或验收文档传递。
+BotMux 需要当前应用的 App ID 与 App Secret。首选 BotMux 交互式 setup 的“选择已有应用”：使用飞书扫码建立 Web session，选择 `cli_aa9f099867385ccc`，由 BotMux 通过开放平台只读接口自动获取 App Secret。这样 secret 不进入聊天、shell argv、Git、日志或验收文档。禁止使用脚本化 `--app-secret` 参数；自动获取失败时暂停，由用户在本机终端处理，不在聊天中粘贴。
 
 按 BotMux 上游当前契约，`~/.botmux/bots.json` 以 `0600` 保存机器人配置。上线前必须验证：
 
@@ -83,7 +88,9 @@ BotMux 需要当前应用的 App ID 与 App Secret。App Secret 只通过本机�
 
 ### 5.3 Codex
 
-BotMux 只调用本机现有 Codex 可执行文件和登录态。首轮配置显式指定 `cliId: "codex"`、工作目录和必要的文件隔离，不创建第二套模型凭证。
+BotMux 只调用本机现有 Codex 可执行文件和登录态。首轮配置选择 `cliId: "codex-app"`，直接使用 BotMux 的 App Server runner；不选择普通 `codex` 的实验性 hybrid `codexRpcInput`，因为该模式默认关闭，并且在 sandbox、wrapper、启动命令或审批门控下会回退到终端粘贴。
+
+首轮同时启用 BotMux 外层文件 sandbox，将真实写入面限制在配置的工作目录与适配器必需的 `~/.codex`。`codex-app` 当前在 App Server 内使用 `approvalPolicy: "never"` 和 `danger-full-access`，审批请求不会映射成飞书确认卡；这是第一阶段明确记录的能力缺口，而不是等价能力。外层 sandbox 是本阶段的安全边界，审批桥接留到基础链路验收后的插件/通用扩展评审。
 
 ## 6. 接入流程
 
@@ -95,7 +102,7 @@ BotMux 只调用本机现有 Codex 可执行文件和登录态。首轮配置显
 2. 使用锁文件安装依赖；
 3. 运行 BotMux 单元测试和 TypeScript 构建；
 4. 检查本机 Node、pnpm、Codex、tmux 与 BotMux 必需组件；
-5. 生成最小 Bot 配置并执行不占用事件流的凭证、权限和目录检查；
+5. 通过交互式“选择已有应用”生成最小 Bot 配置，执行不占用事件流的凭证、权限和目录检查；setup 使用 `--no-open-platform-auto`，第一步不自动修改现有应用权限、事件订阅或发布版本；
 6. 记录旧服务进程、LaunchAgent、配置、状态和日志的精确清单。
 
 任何基线测试或构建失败都先停止接入，不能带病切换。
@@ -111,6 +118,8 @@ BotMux 只调用本机现有 Codex 可执行文件和登录态。首轮配置显
 5. 完成真机验收。
 
 此时只停止旧服务，不删除旧文件。若核心链路失败，立即停止 BotMux、确认其消费者退出，再恢复旧 LaunchAgent。不得同时运行两套消费者进行“对比测试”。
+
+基础消息链路通过后，使用 BotMux 内建 Codex notifier 完成跨端验收，不另装或开发通知插件：在 Dashboard 选择当前 Bot，将 `notifyWhen` 临时设为 `always` 并启用；先记录 `~/.codex/hooks.json` 的结构与已有 Hook，确认 BotMux 幂等合并 `UserPromptSubmit`、`Stop` 且保留其它 Hook。验收结束后恢复日常值 `locked_only`。关闭 notifier 时不删除 Hook，它会快速返回 disabled，这是上游既有生命周期。
 
 ### 6.3 不可逆清理
 
@@ -147,6 +156,8 @@ BotMux 只调用本机现有 Codex 可执行文件和登录态。首轮配置显
 - BotMux 配置解析、Bot 列表和状态检查成功；
 - daemon 重启后恢复到 ready；
 - 未发现第二套同 App ID 的飞书事件消费者；
+- Dashboard 和 Web Terminal 仅监听 `127.0.0.1`，Dashboard 匿名只读关闭；
+- `botmux codex-watch-status` 显示 Hook、worker 和 outbox 正常，已有非 BotMux Hook 未被覆盖；
 - 配置、状态和日志权限符合上游安全契约；
 - Git 工作树不包含凭证或运行状态。
 
@@ -159,6 +170,7 @@ BotMux 只调用本机现有 Codex 可执行文件和登录态。首轮配置显
 - 飞书移动端能够发送、查看流式状态、追问和停止；
 - 任务进行中、完成、失败和停止状态不会长期卡在错误阶段；
 - BotMux 重启后已有 Session 可继续；
+- 在 Codex App 完成一个原生任务后收到 BotMux 通知，从飞书“继续处理”能接管同一个原生 thread；随后在 Codex App 中恢复该 thread，确认上下文连续；
 - Dashboard 能查看同一 Session，Web Terminal 仅本机可达；
 - Codex App/CLI 原生任务和登录状态未受破坏。
 
@@ -188,3 +200,5 @@ BotMux 只调用本机现有 Codex 可执行文件和登录态。首轮配置显
 4. 智能最终卡片快捷动作。
 
 每项单独设计、单独测试，不在第一阶段提前实现。
+
+所有后续候选都先验证 BotMux 原生能力和现有插件契约；自行开发的业务能力统一收口到 `extensions/codex-office/` 插件包，通过 Skill/MCP 等贡献点实现，不修改 BotMux 核心。需要核心扩展时，只新增通用接口，不把个人工作流写入公共事件、卡片或 Session 模块，并单独提交以便向上游发 PR 或在上游实现后删除。
