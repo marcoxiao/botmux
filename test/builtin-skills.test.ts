@@ -5,6 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { ASK_SKILL, BUILTIN_SKILLS, RETIRED_SKILL_NAMES, WHITEBOARD_SKILL, WHITEBOARD_SKILL_NAME, WORKFLOW_FEATURE_SKILLS } from '../src/skills/definitions.js';
+import { messages as zhMessages } from '../src/i18n/zh.js';
 
 /** The v3 Workflow skill family is factored out of BUILTIN_SKILLS into a
  *  feature-gated group (WORKFLOW_FEATURE_SKILLS); these content assertions look
@@ -13,6 +14,19 @@ import { ASK_SKILL, BUILTIN_SKILLS, RETIRED_SKILL_NAMES, WHITEBOARD_SKILL, WHITE
 const ALL_DEFINED_SKILLS = [...BUILTIN_SKILLS, ...WORKFLOW_FEATURE_SKILLS];
 
 describe('built-in botmux-send skill', () => {
+  it('defers ordinary final delivery to the active routing contract', () => {
+    const skill = BUILTIN_SKILLS.find(s => s.name === 'botmux-send');
+    expect(skill).toBeDefined();
+    expect(skill!.content).toContain('当前注入的 `botmux_routing` / `botmux_reminder` 优先');
+    expect(skill!.content).toContain('普通答复写入 `final`');
+    expect(skill!.content).not.toContain('想让用户看到的内容**必须**通过 `botmux send` 发送');
+  });
+
+  it('keeps send-success guidance compatible with canonical final delivery', () => {
+    expect(zhMessages['ai.send.after_success_hint']).toContain('当前 routing 指定普通答复写 final');
+    expect(zhMessages['ai.send.after_success_hint']).toContain('否则继续 `botmux send`');
+  });
+
   it('teaches safe multiline sends across Unix and Windows shells', () => {
     const skill = BUILTIN_SKILLS.find(s => s.name === 'botmux-send');
     expect(skill).toBeDefined();

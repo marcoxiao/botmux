@@ -72,7 +72,7 @@ import { stagePendingRepoSetup, persistPendingRepoCardMessageId, restorePendingR
 import { announceSessionRow, markSessionActivity, announcePendingRepoSession } from './session-activity.js';
 import { scanMultipleProjects } from '../services/project-scanner.js';
 import { buildRepoSelectCard } from '../im/lark/card-builder.js';
-import { repoPickerScanOptions } from '../global-config.js';
+import { readGlobalConfig, repoPickerScanOptions } from '../global-config.js';
 import { usageLimitStateKey } from '../utils/cli-usage-limit.js';
 import { t, localeForBot, getDefaultLocale, type Locale } from '../i18n/index.js';
 import { parseWorkingDirList } from '../utils/working-dir.js';
@@ -88,6 +88,10 @@ import { escapeXmlTagLikeTokens } from '../utils/xml.js';
 import { chatAppLink, threadAppLink, normalizeBrand } from '../im/lark/lark-hosts.js';
 import { writePromptContext } from '../services/prompt-context-store.js';
 import { hasInstalledPromptHookCached } from '../adapters/hook-installer.js';
+import { resolveEffectivePluginIds } from './plugins/effective.js';
+import { resolveTurnProgressPluginId } from './plugins/runtime.js';
+import { readSessionPluginManifest } from './plugins/session-manifest.js';
+import { isStructuredBridgeFallbackActive } from '../services/structured-bridge-clis.js';
 
 export { getAttachmentsDir } from './attachment-path.js';
 
@@ -1027,6 +1031,24 @@ function buildCodexAppTurnInput(opts: {
   };
 }
 
+function canonicalProgressFinalEnabled(
+  sessionId: string,
+  larkAppId: string | undefined,
+  cliId: CliId | undefined,
+  adoptMode = false,
+): boolean {
+  if (cliId !== 'codex-app' && !isStructuredBridgeFallbackActive(cliId, adoptMode)) return false;
+  try {
+    const manifest = readSessionPluginManifest(sessionId);
+    const pluginIds = manifest?.pluginIds ?? (larkAppId
+      ? resolveEffectivePluginIds(getBot(larkAppId).config, readGlobalConfig())
+      : []);
+    return resolveTurnProgressPluginId(pluginIds) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 export function buildNewTopicPrompt(
   userMessage: string,
   sessionId: string,
@@ -1046,7 +1068,9 @@ export function buildNewTopicPrompt(
   // (Claude Code builds its own via --append-system-prompt). Source hints
   // freshly from i18n so they respect the resolved locale instead of the
   // static `adapter.systemHints` array that was baked at module load.
-  const hints = adapter.injectsSessionContext ? [] : buildBotmuxShellHints(locale);
+  const hints = adapter.injectsSessionContext ? [] : buildBotmuxShellHints(locale, {
+    canonicalFinalDelivery: canonicalProgressFinalEnabled(sessionId, opts?.larkAppId, cliId),
+  });
 
   const routingBlock = hints.length > 0
     ? `<botmux_routing>\n${hints.join('\n')}\n</botmux_routing>`
@@ -1286,9 +1310,16 @@ function buildFollowUpBlocks(
     // applies to the next follow-up turn without a daemon restart.
     // hook 模式（#794）：reminder 经 system-reminder 离带注入，命令式措辞可能触发
     // 模型的注入防御被表面化，改用描述式的 reminder_hook。
-    const reminderKey = hookMode
-      ? 'ai.followup.reminder_hook'
-      : config.noVisibleOutputHint ? 'ai.followup.reminder_no_resend' : 'ai.followup.reminder';
+    const reminderKey = canonicalProgressFinalEnabled(
+      sessionId,
+      opts?.larkAppId,
+      opts?.cliId,
+      opts?.isAdoptMode === true,
+    )
+      ? 'ai.followup.reminder_canonical'
+      : hookMode
+        ? 'ai.followup.reminder_hook'
+        : config.noVisibleOutputHint ? 'ai.followup.reminder_no_resend' : 'ai.followup.reminder';
     const reminder = t(reminderKey, undefined, opts?.locale);
     blocks.push({ key: 'reminder', text: `<botmux_reminder>${reminder}</botmux_reminder>` });
   }

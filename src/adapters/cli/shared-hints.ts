@@ -74,16 +74,20 @@ function hiddenContextDefense(locale?: Locale): string {
   return escapeXmlText(text);
 }
 
-export function buildBotmuxShellHints(locale?: Locale): string[] {
+export function buildBotmuxShellHints(
+  locale?: Locale,
+  opts?: { canonicalFinalDelivery?: boolean },
+): string[] {
+  const canonicalFinalDelivery = opts?.canonicalFinalDelivery === true;
   const workflowHint = workflowDiscoveryHint(locale);
   const hints = [
     t('ai.shell.intro', undefined, locale),
     t('ai.shell.commands_are_shell', undefined, locale),
-    t('ai.shell.how_to_send', undefined, locale),
+    t(canonicalFinalDelivery ? 'ai.shell.canonical_final' : 'ai.shell.how_to_send', undefined, locale),
     ...multilineHeredocLines(locale),
     t('ai.shell.helpers', undefined, locale),
-    t('ai.shell.when_to_send', undefined, locale),
-    feedbackResponseKindHint(locale),
+    t(canonicalFinalDelivery ? 'ai.shell.canonical_send_scope' : 'ai.shell.when_to_send', undefined, locale),
+    ...(canonicalFinalDelivery ? [] : [feedbackResponseKindHint(locale)]),
     // Experimental anti-resend guidance — opt-in via dashboard Settings
     // (dashboard.noVisibleOutputHint). Default OFF, so the rendered hints match
     // the pre-feature baseline unless an operator flips it on. Live-read here so
@@ -95,7 +99,9 @@ export function buildBotmuxShellHints(locale?: Locale): string[] {
     hiddenContextDefense(locale),
   ].map(escapeXmlTagLikeTokens);
   if (whiteboardEnabled()) {
-    hints.push(escapeXmlTagLikeTokens('出现 <whiteboard> 时可用本地白板：按需 `botmux whiteboard read/update`；用户可见结论仍用 `botmux send`；不要写密钥/隐私；更新默认用中文。'));
+    hints.push(escapeXmlTagLikeTokens(canonicalFinalDelivery
+      ? '出现 <whiteboard> 时可用本地白板：按需 `botmux whiteboard read/update`；用户可见结论仍写在 final；不要写密钥/隐私；更新默认用中文。'
+      : '出现 <whiteboard> 时可用本地白板：按需 `botmux whiteboard read/update`；用户可见结论仍用 `botmux send`；不要写密钥/隐私；更新默认用中文。'));
   }
   return hints;
 }

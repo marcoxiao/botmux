@@ -703,7 +703,7 @@ export const messages: Record<string, string> = {
   'ai.routing.workflow_hint': 'Workflow：有界的多步目标可用自然语言或 `/workflow` 自动拆成 DAG；成功后可保存复用。',
   'ai.routing.feedback_response_kind': '若此 bot 启用了最终回答反馈，用 `botmux send --response-kind final` 标记本轮最终回答（挂反馈按钮）；进度/补充类发送无需加 flag（不声明默认按 progress、不挂反馈）。',
   'ai.routing.hidden_context_defense': '以下 XML/配置块是隐藏运行上下文，只能静默读取并遵守：`<botmux_routing>`、`<botmux_builtin_skills>`、`<identity>`、`<session_id>`、`<role>`、`<sender>`、`<mentions>`、`<available_bots>`、`<attachments>`。不要回复、不要确认、不要说“已了解/已补充/已记录”。只处理 `<user_message>` 中的真实用户请求。',
-  'ai.send.after_success_hint': '若还有要发给用户的内容，继续 `botmux send`；没有了就让最终回复只输出 BOTMUX_NOTHING_TO_SEND。',
+  'ai.send.after_success_hint': '若当前 routing 指定普通答复写 final，剩余普通答复写 final；否则继续 `botmux send`。若已完整发送则让最终回复只输出 BOTMUX_NOTHING_TO_SEND。',
 
   // ─── AI identity (multi-bot routing rules) ───────────────────────────────
   'ai.identity.unknown': '(未知)',
@@ -718,10 +718,12 @@ export const messages: Record<string, string> = {
   'ai.shell.intro': '你运行在飞书（Lark）话题群中。用户在飞书阅读回复，看不到你的终端输出。',
   'ai.shell.commands_are_shell': '重要：botmux send / botmux history / botmux quoted / botmux bots 都是 shell 命令（CLI 程序，已安装在 $PATH），不是 MCP 工具。必须通过 Bash 工具执行，不要到 MCP 工具列表里找。',
   'ai.shell.how_to_send': '把消息发给用户（唯一方式）：用 Bash 执行 `botmux send "消息内容"`；附带图片用 `--images /path`，附带文件用 `--files /path`，附带视频预览用 `--videos /path.mp4 --video-covers /cover.png`。',
+  'ai.shell.canonical_final': '普通回复直接写在 final；BotMux 会通过本轮标准通道投递，普通飞书消息由进度卡接管时会回填当前卡。不要为普通最终答复调用 `botmux send`。',
   'ai.shell.multiline_heredoc': '多行正文必须走 quoted heredoc / stdin（或 UTF-8 `--content-file`）；禁止写成 `botmux send "第一行\\n第二行"`，也不要先 `JSON.stringify` / JSON 转义再传位置参数，shell / botmux 不会把字面量 `\\n` 还原成换行。',
   'ai.shell.heredoc_example': "正确多行示例：\n```bash\nbotmux send <<'EOF'\n第一行\n第二行\nEOF\n```",
   'ai.shell.helpers': '辅助命令：`botmux history`（读此会话历史；thread/话题会话拉话题内，普通群 chat-scope 会话拉整群）、`botmux quoted <message_id>`（按需读取被引用的消息，仅在 prompt 头部出现 `[用户引用了消息 ...]` 提示时使用）、`botmux bots list`（查群内其他机器人）。',
   'ai.shell.when_to_send': '发给你的消息至少用 `botmux send` 回应一次（Bash 执行,不是 print/echo）,别沉默;发什么、发几条由你判断。只有根本不是发给你的消息才让最终 assistant message 只输出 `BOTMUX_NOTHING_TO_SEND` 这一个词。',
+  'ai.shell.canonical_send_scope': '`botmux send` 仅用于中途主动推送、发送附件，或通过 @ 触发其他机器人接力。若已用它发送用户可见的最终答复，final 只输出 `BOTMUX_NOTHING_TO_SEND`，避免重复；消息根本不是发给你时也这样处理。',
   'ai.shell.no_visible_output_ok': '`botmux send` 成功（退出码 0）即代表已送达用户；本轮终端没有可见文本、直接结束是正常的。若看到「你上一条回复没有可见输出，请继续产出用户可见回复」之类提示，那是底层 CLI 的误判——不要重发，除非 `botmux send` 自己报错。',
   'ai.shell.mention_gate': '@ 决策（硬性）：每条 `botmux send` 必须显式三选一否则报错——`--mention <open_id:名字>`（点名指定人/bot，跟别的 bot 沟通/协作必须用它）/ `--mention-back`（@回本轮触发者本人）/ `--no-mention`（不@）。先按内容价值决定要不要 @：有实质结论要对方看/确认/决策→需要 @；纯记录/低优先级/简短确认→--no-mention；没信息量的"收到"不如不发。再按收件人选方式：就是回触发这轮的人/bot→--mention-back；要 @ 别人（多人会话回复对象不一定是触发者）→--mention 显式点名。别把 --no-mention 当默认，也别无意义 @ 打扰。',
 
@@ -732,6 +734,7 @@ export const messages: Record<string, string> = {
   'ai.available_bots.hint_collapsed': '要跟别的 bot 沟通或协作先 `botmux bots list` 查 open_id 再 --mention，不 --mention 对方收不到',
   'ai.available_bots.collapsed_line': '群里有 {count} 个可协作 bot：{names}。',
   'ai.followup.reminder': '发给你的消息至少 botmux send 回应一次,别沉默;发什么、发几条你自己判断。只有根本不是发给你的消息才让 final 只输出 BOTMUX_NOTHING_TO_SEND',
+  'ai.followup.reminder_canonical': '普通回复直接写在 final；BotMux 会通过本轮标准通道投递，普通飞书消息由进度卡接管时会回填当前卡。仅在主动推送、发送附件或 @ 触发其他机器人时使用 botmux send。只有消息根本不是发给你时，final 才只输出 BOTMUX_NOTHING_TO_SEND',
   'ai.followup.reminder_hook': '本会话通过 botmux 桥接飞书,终端里的输出用户看不到。会话约定:回复通过 botmux send 发送到飞书话题;发什么、发几条由你判断。只有根本不是发给你的消息才让 final 只输出 BOTMUX_NOTHING_TO_SEND。',
   'ai.followup.reminder_no_resend': '发给你的消息至少 botmux send 回应一次,别沉默;发什么、发几条你自己判断。只有根本不是发给你的消息才让 final 只输出 BOTMUX_NOTHING_TO_SEND;send 成功即已送达,本轮无可见文本地结束是正常的,别因「无输出」提示重发',
   'ai.cursor.sender_note': 'sender 标签只是元信息（标识当前发言人），不要把其中的 open_id 或名字（例如 ou_xxx:高鹏）抄进 botmux send 的正文或开头；要 @ 回触发者请用 botmux send --mention-back。',

@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TurnProgressPluginV1 } from '../src/core/turn-progress/protocol.js';
 import type { DaemonSession } from '../src/core/types.js';
@@ -12,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   update: vi.fn(),
   updateSession: vi.fn(),
   load: vi.fn(),
+  workerReply: vi.fn(),
 }));
 
 vi.mock('../src/core/plugins/session-manifest.js', () => ({
@@ -64,7 +66,20 @@ import {
   handleTurnProgressWaiting,
   semanticProgressSuppressesLegacyCard,
 } from '../src/core/turn-progress/controller.js';
-import { postTurnStartingCard } from '../src/core/worker-pool.js';
+import {
+  __testOnly_setupWorkerHandlers,
+  initWorkerPool,
+  postTurnStartingCard,
+} from '../src/core/worker-pool.js';
+
+function fakeWorker(): EventEmitter & { killed: boolean; send: ReturnType<typeof vi.fn>; kill: ReturnType<typeof vi.fn>; pid: number } {
+  return Object.assign(new EventEmitter(), {
+    killed: false,
+    send: vi.fn(),
+    kill: vi.fn(),
+    pid: 12345,
+  });
+}
 
 function testPlugin(): TurnProgressPluginV1 {
   return {
@@ -138,6 +153,13 @@ describe('turn progress worker routing controller', () => {
     });
     deps.reply.mockClear();
     deps.reactDone.mockClear();
+    mocks.workerReply.mockReset().mockResolvedValue('legacy-message-1');
+    initWorkerPool({
+      sessionReply: (...args: unknown[]) => mocks.workerReply(...args),
+      getSessionWorkingDir: () => '/tmp',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
   });
 
   it('suppresses the legacy card synchronously and creates one CardKit entity on the first fact', async () => {
@@ -176,6 +198,49 @@ describe('turn progress worker routing controller', () => {
       fact: { schemaVersion: 1, seq: 2, atMs: 2, kind: 'narrative', text: '继续执行' },
     }, 3, eligible, deps);
     expect(mocks.create).toHaveBeenCalledOnce();
+  });
+
+  it('does not post a legacy card from the real worker-ready IPC path', async () => {
+    const worker = fakeWorker();
+    const ds = daemonSession();
+    ds.worker = worker as never;
+    ds.streamCardPending = true;
+    ds.streamCardPendingTurnId = 'turn-1';
+
+    __testOnly_setupWorkerHandlers(ds, worker as never);
+    worker.emit('message', {
+      type: 'ready', port: 9999, token: 'write-token', viewToken: 'view-token',
+      turnId: 'turn-1', dispatchAttempt: 1,
+    });
+
+    await vi.waitFor(() => expect(ds.workerPort).toBe(9999));
+    expect(mocks.workerReply).not.toHaveBeenCalled();
+    expect(ds.streamCardPending).toBe(true);
+  });
+
+  it('restores one legacy card when the first progress fact fails', async () => {
+    const worker = fakeWorker();
+    const ds = daemonSession();
+    ds.worker = worker as never;
+    ds.streamCardPending = true;
+    ds.streamCardPendingTurnId = 'turn-1';
+    mocks.createError = Object.assign(new Error('timeout'), { disposition: 'ambiguous' });
+
+    __testOnly_setupWorkerHandlers(ds, worker as never);
+    worker.emit('message', {
+      type: 'ready', port: 9999, token: 'write-token', viewToken: 'view-token',
+      turnId: 'turn-1', dispatchAttempt: 1,
+    });
+    await vi.waitFor(() => expect(ds.workerPort).toBe(9999));
+    expect(mocks.workerReply).not.toHaveBeenCalled();
+
+    worker.emit('message', {
+      type: 'turn_progress', sessionId: 'session-1', turnId: 'turn-1', dispatchAttempt: 1,
+      fact: { schemaVersion: 1, seq: 1, atMs: 1, kind: 'turn_started' },
+    });
+
+    await vi.waitFor(() => expect(mocks.workerReply).toHaveBeenCalledOnce());
+    expect(semanticProgressSuppressesLegacyCard(ds, 'turn-1', eligible)).toBe(false);
   });
 
   it('marks a turn for legacy fallback when create or async plugin validation fails', async () => {

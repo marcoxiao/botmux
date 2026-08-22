@@ -9,7 +9,12 @@
  *
  * Run:  pnpm vitest run test/prompt-builder.test.ts
  */
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+
+const botMocks = vi.hoisted(() => ({
+  plugins: undefined as string[] | undefined,
+  globalPlugins: undefined as string[] | undefined,
+}));
 
 // ─── Mocks ────────────────────────────────────────────────────────────────
 
@@ -45,6 +50,11 @@ vi.mock('../src/config.js', () => ({
   },
 }));
 
+vi.mock('../src/global-config.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/global-config.js')>(),
+  readGlobalConfig: vi.fn(() => ({ plugins: botMocks.globalPlugins })),
+}));
+
 vi.mock('../src/im/lark/client.js', () => ({
   downloadMessageResource: vi.fn(),
   listChatBotMembers: vi.fn(async () => []),
@@ -52,9 +62,24 @@ vi.mock('../src/im/lark/client.js', () => ({
 
 vi.mock('../src/bot-registry.js', () => ({
   getBot: vi.fn(() => ({
-    config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code' },
+    config: {
+      larkAppId: 'app_test',
+      larkAppSecret: 'secret',
+      cliId: 'claude-code',
+      plugins: botMocks.plugins,
+    },
   })),
   getAllBots: vi.fn(() => []),
+}));
+
+vi.mock('../src/core/plugins/session-manifest.js', () => ({
+  readSessionPluginManifest: vi.fn(() => null),
+}));
+
+vi.mock('../src/core/plugins/runtime.js', () => ({
+  resolveTurnProgressPluginId: vi.fn((ids: readonly string[]) => (
+    ids.includes('custom-progress') ? 'custom-progress' : undefined
+  )),
 }));
 
 vi.mock('../src/services/session-store.js', () => ({
@@ -94,6 +119,11 @@ import { BOTMUX_SHELL_HINTS, buildBotmuxShellHints, buildBotmuxSystemPromptText 
 import type { DaemonSession } from '../src/core/types.js';
 
 // ─── Tests ────────────────────────────────────────────────────────────────
+
+beforeEach(() => {
+  botMocks.plugins = undefined;
+  botMocks.globalPlugins = undefined;
+});
 
 describe('buildNewTopicPrompt', () => {
   const SESSION_ID = 'test-session-id-123';
@@ -144,6 +174,38 @@ describe('buildNewTopicPrompt', () => {
     expect(prompt).toContain('把消息发给用户（唯一方式）');
     expect(prompt).not.toContain('普通文本答案不要调用 `botmux send`');
     expect(prompt).not.toContain('botmux 会自动把 final_output 转发到飞书');
+  });
+
+  it('routes an opening turn through canonical final delivery when turn progress is enabled', () => {
+    botMocks.plugins = ['custom-progress'];
+
+    const prompt = buildNewTopicPrompt(
+      'hello', SESSION_ID, 'traex', undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, { larkAppId: 'app_test' },
+    );
+
+    expect(prompt).toContain('普通回复直接写在 final');
+    expect(prompt).toContain('由进度卡接管时会回填当前卡');
+    expect(prompt).not.toContain('把消息发给用户（唯一方式）');
+    expect(prompt).not.toContain('发给你的消息至少用 `botmux send` 回应一次');
+  });
+
+  it('keeps send-first routing for a CLI without a reliable final-output bridge', () => {
+    botMocks.globalPlugins = ['custom-progress'];
+
+    const opening = buildNewTopicPrompt(
+      'hello', SESSION_ID, 'gemini', undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, { larkAppId: 'app_test' },
+    );
+    const followUp = buildFollowUpContent('hello', SESSION_ID, {
+      cliId: 'gemini',
+      larkAppId: 'app_test',
+    });
+
+    expect(opening).toContain('把消息发给用户（唯一方式）');
+    expect(opening).not.toContain('普通回复直接写在 final');
+    expect(followUp).toContain('发给你的消息至少 botmux send 回应一次');
+    expect(followUp).not.toContain('普通回复直接写在 final');
   });
 
   it('should NOT embed <session_id> for CLIs with injectsSessionContext (claude-code)', () => {
@@ -342,6 +404,18 @@ describe('buildFollowUpContent', () => {
   it('should include <session_id> in normal mode', () => {
     const content = buildFollowUpContent('hello', SESSION_ID);
     expect(content).toContain(`<session_id>${SESSION_ID}</session_id>`);
+  });
+
+  it('keeps follow-up final output on the current progress card', () => {
+    botMocks.plugins = ['custom-progress'];
+
+    const content = buildFollowUpContent('hello', SESSION_ID, {
+      cliId: 'traex',
+      larkAppId: 'app_test',
+    });
+
+    expect(content).toContain('<botmux_reminder>普通回复直接写在 final；BotMux 会通过本轮标准通道投递，普通飞书消息由进度卡接管时会回填当前卡。仅在主动推送、发送附件或 @ 触发其他机器人时使用 botmux send。只有消息根本不是发给你时，final 才只输出 BOTMUX_NOTHING_TO_SEND</botmux_reminder>');
+    expect(content).not.toContain('发给你的消息至少 botmux send 回应一次');
   });
 
   it('should include <session_id> when isAdoptMode is false', () => {

@@ -10199,6 +10199,15 @@ function setupWorkerHandlers(
           break;
         }
 
+        if (semanticProgressSuppressesLegacyCard(
+          ds,
+          msg.turnId,
+          turnProgressEligibilityFor(ds, msg.turnId, msg.dispatchAttempt),
+        )) {
+          logger.info(`[${t}] Semantic progress owns this turn — skipping legacy worker-ready card`);
+          break;
+        }
+
         // Restart recovery: stay silent in the group. The session was restored
         // after a daemon restart; don't auto-post/patch a streaming card here.
         // The owner gets a private DM summary instead, and the surviving card
