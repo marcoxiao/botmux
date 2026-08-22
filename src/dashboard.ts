@@ -207,6 +207,7 @@ import {
   hasResolvedCodexNotifierRecipient,
   resolveCodexNotifierRecipientView,
 } from './dashboard/settings-write-applier.js';
+import { daemonListsChat } from './dashboard/codex-notifier-target-chat.js';
 import {
   addBotsToGroup,
   bindOncall,
@@ -996,17 +997,8 @@ async function validateCodexNotifierTargetBotAppId(
       return { ok: false, error: 'codexNotifier_target_owner_unverified' };
     }
     if (options.targetChatId) {
-      try {
-        const response = await fetchDaemonIpc(
-          daemon.ipcPort,
-          `/api/groups/${encodeURIComponent(options.targetChatId)}/membership`,
-          { signal: AbortSignal.timeout(5_000) },
-        );
-        const body = await response.json().catch(() => ({})) as { inChat?: unknown };
-        if (response.ok && body.inChat === true) return { ok: true };
-      } catch {
-        // A live membership probe is authoritative. Any transport or daemon
-        // error means the destination cannot be safely persisted right now.
+      if (await daemonListsChat(fetchDaemonIpc, daemon.ipcPort, options.targetChatId)) {
+        return { ok: true };
       }
       return { ok: false, error: 'codexNotifier_target_chat_unavailable' };
     }
