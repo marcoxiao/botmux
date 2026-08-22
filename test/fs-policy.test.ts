@@ -176,6 +176,13 @@ describe('buildFsPolicy', () => {
   it('darwin baseline: system ro, scratch rw, crown jewels denied, lark-cli store denied', () => {
     const p = buildFsPolicy(ctx());
     expect(accessForPath(p.rules, '/System/Library/Frameworks/x').access).toBe('readOnly');
+    // A process launched from an application bundle must be able to load its
+    // embedded frameworks. Without this, Codex hooks that invoke a macOS app
+    // start and then die in dyld before the hook can return.
+    expect(accessForPath(
+      p.rules,
+      '/Applications/Flux Island.app/Contents/Frameworks/Electron Framework.framework/Electron Framework',
+    ).access).toBe('readOnly');
     expect(accessForPath(p.rules, '/usr/bin/env').access).toBe('readOnly');
     expect(accessForPath(p.rules, '/private/var/folders/ab/T/x').access).toBe('readWrite');
     expect(accessForPath(p.rules, '/Users/u/.ssh/id_rsa').access).toBe('deny');

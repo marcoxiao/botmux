@@ -368,6 +368,10 @@ function darwinBaseline(h: string): FsRule[] {
     ...commonHomeBaseline(h),
     // System: dyld/frameworks/toolchain — broad readOnly + surgical deny holes.
     ro('/System'), ro('/usr'), ro('/bin'), ro('/sbin'), ro('/Library'), ro('/opt'),
+    // App-bundle executables load embedded frameworks/resources from their own
+    // bundle. process* alone lets a hook launch them, but dyld then aborts unless
+    // the bundle is readable (for example an Electron-based Codex hook helper).
+    ro('/Applications'),
     ro('/private/etc'),
     ro('/private/var/select'),   // /var/select/sh
     ro('/private/var/db/timezone'),

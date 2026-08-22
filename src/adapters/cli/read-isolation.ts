@@ -391,7 +391,9 @@ export function isolationPanePolicyDigest(input: IsolationPanePolicyInput): stri
     .filter((value): value is string => !!value)
     .sort();
   return createHash('sha256').update(JSON.stringify({
-    domain: 'botmux.darwin-seatbelt-policy.v7',
+    // Bump whenever the compiled baseline changes so a persistent pane cannot
+    // reattach under a stale Seatbelt profile after BotMux is upgraded.
+    domain: 'botmux.darwin-seatbelt-policy.v8',
     readIsolation: input.readIsolation,
     writeSandbox: input.writeSandbox,
     readDenyExtraPaths: normalizedExtra,
