@@ -59,12 +59,15 @@ export interface PluginServiceContribution extends PluginRuntimeEntrypoint {
   mode: PluginServiceMode;
 }
 
+export interface PluginTurnProgressContribution extends PluginRuntimeEntrypoint {}
+
 export interface PluginContributions {
   skills?: PluginSkillEntry[];
   dashboard?: PluginDashboardEntry[];
   mcp?: PluginMcpContribution;
   cli?: PluginCliContribution;
   service?: PluginServiceContribution;
+  turnProgress?: PluginTurnProgressContribution;
 }
 
 /** Installation-time scan result before MCP details are moved to private

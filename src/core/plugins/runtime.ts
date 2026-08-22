@@ -3,6 +3,7 @@ import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { atomicWriteFileSync } from '../../utils/atomic-write.js';
 import { readPluginRegistry } from '../../services/plugin-registry-store.js';
+import type { TurnProgressContextV1, TurnProgressPluginV1 } from '../turn-progress/protocol.js';
 import {
   pluginConfigPath,
   pluginRuntimeDir,
@@ -61,6 +62,11 @@ export interface PluginCliCommand {
 
 export interface RegisteredPluginCommand extends PluginCliCommand {
   pluginId: string;
+}
+
+export interface LoadedTurnProgressPlugin {
+  pluginId: string;
+  plugin: TurnProgressPluginV1;
 }
 
 function readJsonObject(path: string): Record<string, unknown> {
@@ -204,4 +210,64 @@ export async function collectPluginCliCommands(pluginIds?: readonly string[]): P
     }
   }
   return commands;
+}
+
+function selectedTurnProgressRecords(pluginIds: readonly string[]): InstalledPluginRecord[] {
+  if (pluginIds.length === 0) return [];
+  return orderedPluginRecords(pluginIds).filter(record => record.contributions?.turnProgress);
+}
+
+export function resolveTurnProgressPluginId(pluginIds: readonly string[]): string | undefined {
+  const ids = selectedTurnProgressRecords(pluginIds).map(record => record.id);
+  if (ids.length > 1) throw new Error(`multiple_turn_progress_plugins:${ids.join(',')}`);
+  return ids[0];
+}
+
+export async function loadTurnProgressPlugin(
+  pluginIds: readonly string[],
+): Promise<LoadedTurnProgressPlugin | undefined> {
+  const pluginId = resolveTurnProgressPluginId(pluginIds);
+  if (!pluginId) return undefined;
+
+  const record = orderedPluginRecords([pluginId])[0];
+  const entrypoint = record.contributions?.turnProgress?.entry;
+  if (!entrypoint) throw new Error(`turn_progress_plugin_entry_not_found:${pluginId}`);
+  const entry = resolvePluginPath(pluginRuntimeDir(pluginId), entrypoint, 'turn_progress_entry');
+  if (!existsSync(entry)) throw new Error(`turn_progress_plugin_entry_not_found:${pluginId}:${entrypoint}`);
+
+  const mod = await import(pathToFileURL(entry).href);
+  const exported: unknown = mod.default ?? mod;
+  if (!exported || typeof exported !== 'object' || Array.isArray(exported)) {
+    throw new Error(`invalid_turn_progress_plugin_exports:${pluginId}`);
+  }
+  const candidate = exported as Partial<TurnProgressPluginV1>;
+  if (candidate.schemaVersion !== 1) throw new Error(`invalid_turn_progress_plugin_schema:${pluginId}`);
+  if (typeof candidate.initialState !== 'function'
+    || typeof candidate.reduce !== 'function'
+    || typeof candidate.render !== 'function') {
+    throw new Error(`invalid_turn_progress_plugin_exports:${pluginId}`);
+  }
+
+  const plugin = candidate as TurnProgressPluginV1;
+  const probeContext: TurnProgressContextV1 = {
+    schemaVersion: 1,
+    sessionId: '__probe__',
+    primaryTurnId: '__probe__',
+    turnId: '__probe__',
+    workerGeneration: 0,
+    cliId: 'probe',
+    locale: 'en',
+    restored: false,
+  };
+  let rendered: unknown;
+  try {
+    rendered = plugin.render(plugin.initialState(probeContext), probeContext);
+  } catch (cause) {
+    throw new Error(`turn_progress_plugin_probe_failed:${pluginId}`, { cause });
+  }
+  if (!rendered || typeof rendered !== 'object' || Array.isArray(rendered)
+    || (rendered as Record<string, unknown>).schema !== '2.0') {
+    throw new Error(`invalid_turn_progress_plugin_render:${pluginId}`);
+  }
+  return { pluginId, plugin };
 }

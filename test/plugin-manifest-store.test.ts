@@ -164,6 +164,7 @@ describe('plugin manifest and registry basics', () => {
     mkdirSync(join(root, 'dashboard'), { recursive: true });
     mkdirSync(join(root, 'cli'), { recursive: true });
     mkdirSync(join(root, 'service'), { recursive: true });
+    mkdirSync(join(root, 'turn-progress'), { recursive: true });
     writeFileSync(join(root, 'skills', 'browser', 'SKILL.md'), '# Browser\n');
     writeFileSync(join(root, 'mcp', 'server.js'), 'process.stdin.resume();\n');
     writeFileSync(join(root, 'mcp', 'index.json'), JSON.stringify({
@@ -177,6 +178,7 @@ describe('plugin manifest and registry basics', () => {
       commands: [{ name: 'chrome', description: 'Open Chrome tooling' }],
     }));
     writeFileSync(join(root, 'service', 'index.js'), 'export default { pm2: { script: "./service/server.js" } };\n');
+    writeFileSync(join(root, 'turn-progress', 'index.js'), 'export default {};\n');
 
     expect(scanPluginContributions(root, { schemaVersion: 1, id: 'agent-chrome', service: { mode: 'auto' } })).toEqual({
       skills: [{ name: 'browser', path: 'skills/browser' }],
@@ -188,6 +190,7 @@ describe('plugin manifest and registry basics', () => {
         commands: [{ name: 'chrome', description: 'Open Chrome tooling' }],
       },
       service: { entry: 'service/index.js', mode: 'auto' },
+      turnProgress: { entry: 'turn-progress/index.js' },
     });
   });
 

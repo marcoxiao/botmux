@@ -168,18 +168,25 @@ function scanService(runtimeDir: string, mode: PluginServiceMode | undefined): S
   return { entry, mode: mode! };
 }
 
+function scanTurnProgress(runtimeDir: string): ScannedPluginContributions['turnProgress'] {
+  const entry = 'turn-progress/index.js';
+  return isFile(join(runtimeDir, entry)) ? { entry } : undefined;
+}
+
 export function scanPluginContributions(runtimeDir: string, manifest: BotmuxPluginManifest): ScannedPluginContributions | undefined {
   const skills = scanSkills(runtimeDir, manifest.id);
   const mcp = scanMcp(runtimeDir, manifest.id);
   const dashboard = scanDashboard(runtimeDir, manifest.id);
   const cli = scanCli(runtimeDir);
   const service = scanService(runtimeDir, manifest.service?.mode);
+  const turnProgress = scanTurnProgress(runtimeDir);
   const contributions: ScannedPluginContributions = {
     ...(skills ? { skills } : {}),
     ...(mcp ? { mcp } : {}),
     ...(dashboard ? { dashboard } : {}),
     ...(cli ? { cli } : {}),
     ...(service ? { service } : {}),
+    ...(turnProgress ? { turnProgress } : {}),
   };
   return Object.keys(contributions).length > 0 ? contributions : undefined;
 }
