@@ -71,6 +71,9 @@ export interface DaemonSession {
   /** Monotonic within one daemon boot. Captured by durable delivery receipts
    *  so a terminal/exit from a replaced worker cannot settle a newer attempt. */
   workerGeneration?: number;
+  /** Runtime-only semantic progress owner; the durable binding lives on Session. */
+  turnProgressHost?: import('./turn-progress/host.js').TurnProgressHost;
+  turnProgressLegacyFallbackTurns?: Set<string>;
   larkAppId: string;
   chatId: string;
   chatType: 'group' | 'p2p';    // p2p chats need reply_in_thread to create topics

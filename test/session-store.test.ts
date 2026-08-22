@@ -945,6 +945,28 @@ describe('updateSession()', () => {
     });
   });
 
+  it('persists the minimal turn progress binding without a sidecar', () => {
+    const session = createSession('chat1', 'root1', 'Progress binding');
+    session.turnProgressBinding = {
+      schemaVersion: 1,
+      pluginId: 'semantic-progress',
+      primaryTurnId: 'turn-1',
+      primaryDispatchAttempt: 1,
+      memberTurnIds: ['turn-1', 'turn-2'],
+      workerGeneration: 3,
+      cardId: 'card-1',
+      messageId: 'message-1',
+      replyUuid: 'tp_r_1',
+      cardSequence: 4,
+      deliveryState: 'finalizing',
+      updateIntent: { uuid: 'tp_u_5', sequence: 5, cardHash: 'hash-only' },
+    };
+    updateSession(session);
+
+    init();
+    expect(getSession(session.sessionId)?.turnProgressBinding).toEqual(session.turnProgressBinding);
+  });
+
   it('skips the disk write when an update produces byte-identical content', () => {
     // save() does writeFile(tmp) + rename(tmp → fp), so every REAL write
     // replaces the file's inode. A skipped write leaves the inode untouched.

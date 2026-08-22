@@ -170,6 +170,25 @@ export interface ReplyTargetEntry {
   participantsIncomplete?: boolean;
 }
 
+export interface TurnProgressBindingV1 {
+  schemaVersion: 1;
+  pluginId: string;
+  primaryTurnId: string;
+  primaryDispatchAttempt?: number;
+  memberTurnIds: string[];
+  workerGeneration: number;
+  cardId: string;
+  messageId?: string;
+  replyUuid: string;
+  cardSequence: number;
+  deliveryState: 'replying' | 'active' | 'finalizing';
+  updateIntent?: {
+    uuid: string;
+    sequence: number;
+    cardHash: string;
+  };
+}
+
 export interface Session {
   sessionId: string;
   /** Build fingerprint of the last fresh owned Codex App runner that became ready. */
@@ -226,6 +245,8 @@ export interface Session {
   /** Crash-safe bounded recovery state for an ordinary Claude/Lark logical
    * turn. Timer ownership is runtime-only; this record re-arms it on restore. */
   ordinaryTurnRecovery?: import('./services/ordinary-turn-recovery.js').OrdinaryTurnRecoveryState;
+  /** Minimal durable CardKit delivery identity; semantic projection state is runtime-only. */
+  turnProgressBinding?: TurnProgressBindingV1;
   /** Dashboard 看板视图的手动放置：列 id（backlog/todo/in_progress/in_review/done）。
    *  未设置时前端按运行状态推导默认列；一旦用户拖拽过就以此为准。 */
   kanbanColumn?: string;
