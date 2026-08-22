@@ -1182,6 +1182,13 @@ export type WorkerToDaemon =
    * `null` explicitly clears any previous generation's snapshot. */
   | { type: 'codex_service_tier'; snapshot: CodexServiceTierSnapshot | null }
   | { type: 'error'; message: string; turnId?: string; dispatchAttempt?: number }
+  | {
+      type: 'turn_progress';
+      sessionId: string;
+      turnId: string;
+      dispatchAttempt?: number;
+      fact: import('./core/turn-progress/protocol.js').TurnProgressFactV1;
+    }
   | { type: 'bridge_source_session'; bridge: 'hermes'; sourceSessionId: string }
   /** Worker observed a successful explicit `botmux send` for this turn, so
    * the daemon should treat listener-preview runs as visibly replied even
