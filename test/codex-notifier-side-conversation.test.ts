@@ -445,6 +445,67 @@ describe('Codex Side Chat IPC monitor', () => {
     await connected;
   });
 
+  it('never follows a resumed ordinary thread whose rollout lives outside the recent date window', async () => {
+    const controller = new AbortController();
+    const socket = new FakeIpcSocket();
+    socket.onWrite = message => {
+      if (message.type !== 'request' || message.method !== 'initialize') return;
+      queueMicrotask(() => {
+        socket.emit('data', encodeFrame({
+          type: 'broadcast',
+          method: 'thread-stream-following-changed',
+          params: {
+            hostId: 'local',
+            conversationId: HISTORICAL_THREAD_ID,
+            following: true,
+          },
+        }));
+        socket.emit('data', encodeFrame({
+          type: 'response',
+          method: 'initialize',
+          resultType: 'success',
+          result: { clientId: 'test-client' },
+        }));
+      });
+    };
+    queueMicrotask(() => socket.emit('connect'));
+    const hasRollout = vi.fn((_: string, conversationId: string) =>
+      conversationId === HISTORICAL_THREAD_ID);
+    const monitor = new CodexSideConversationMonitor({
+      dataDir: '/tmp/botmux-side-chat-test',
+      platform: 'darwin',
+      scanIntervalMs: 5,
+      candidateStabilizationMs: 0,
+      connectTimeoutMs: 100,
+      initializeTimeoutMs: 100,
+      readConfig: () => ({
+        enabled: true,
+        targetBotAppId: 'cli_test',
+        notifyWhen: 'always',
+      }),
+      listThreads: () => [],
+      listRolloutThreadIds: () => new Set(),
+      hasRollout,
+      connect: () => asSocket(socket),
+    });
+
+    const connected = connectOnce(monitor, controller.signal);
+    await vi.waitFor(() => expect(hasRollout).toHaveBeenCalledWith(
+      expect.any(String),
+      HISTORICAL_THREAD_ID,
+    ));
+    await new Promise(resolve => setTimeout(resolve, 15));
+    expect(socket.writes.some(frame => {
+      const message = decodeFrame(frame);
+      return message.method === 'thread-stream-following-changed'
+        && message.params?.conversationId === HISTORICAL_THREAD_ID
+        && message.params?.following === true;
+    })).toBe(false);
+
+    controller.abort();
+    await connected;
+  });
+
   it('resets observation state while disabled and does not backfill during the disabled window', async () => {
     const sockets: FakeIpcSocket[] = [];
     const controller = new AbortController();

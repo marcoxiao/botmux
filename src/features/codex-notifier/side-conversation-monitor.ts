@@ -7,7 +7,10 @@ import {
 import { createConnection, type Socket } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { codexSessionIdFromRolloutPath } from '../../services/codex-transcript.js';
+import {
+  codexSessionIdFromRolloutPath,
+  findCodexRolloutBySessionId,
+} from '../../services/codex-transcript.js';
 import { createCodexNotifierCompletionEvent } from './event.js';
 import { resolveCodexNotifierConfig, type ResolvedCodexNotifierConfig } from './config.js';
 import { enqueueCodexNotifierEvent } from './outbox.js';
@@ -543,6 +546,7 @@ export interface CodexSideConversationMonitorOptions {
   enqueue?: typeof enqueueCodexNotifierEvent;
   listThreads?: typeof listRecentCodexVisualizationThreads;
   listRolloutThreadIds?: typeof listRecentCodexRolloutThreadIds;
+  hasRollout?: (codexHome: string, conversationId: string) => boolean;
   connect?: (path: string) => Socket;
 }
 
@@ -565,6 +569,7 @@ export class CodexSideConversationMonitor {
   private readonly enqueue: typeof enqueueCodexNotifierEvent;
   private readonly listThreads: typeof listRecentCodexVisualizationThreads;
   private readonly listRolloutThreadIds: typeof listRecentCodexRolloutThreadIds;
+  private readonly hasRollout: (codexHome: string, conversationId: string) => boolean;
   private readonly connect: (path: string) => Socket;
   private readonly tracker = new CodexSideConversationTracker();
   private readonly candidates = new Map<string, {
@@ -616,11 +621,16 @@ export class CodexSideConversationMonitor {
     this.listThreads = options.listThreads ?? listRecentCodexVisualizationThreads;
     this.listRolloutThreadIds = options.listRolloutThreadIds
       ?? listRecentCodexRolloutThreadIds;
+    this.hasRollout = options.hasRollout ?? ((codexHome, conversationId) =>
+      !!findCodexRolloutBySessionId(conversationId, { codexHome }));
     this.connect = options.connect ?? (path => createConnection(path));
   }
 
-  private rememberCandidate(conversationId: string): void {
+  private rememberCandidate(conversationId: string, verifyHistoricalRollout = false): void {
     if (this.candidates.has(conversationId)) return;
+    // 其他 Codex 客户端会广播它正在跟随的主任务。该任务可能几天前创建，
+    // 因而不在近两天的快速索引里；订阅前按 ID 做一次全量权威查找。
+    if (verifyHistoricalRollout && this.hasRollout(this.codexHome, conversationId)) return;
     this.candidates.set(conversationId, {
       discoveredAtMs: this.now(),
       notifyTerminalOnFirstSnapshot: this.observationStartedAt !== undefined,
@@ -898,7 +908,7 @@ export class CodexSideConversationMonitor {
             !this.tracker.has(message.params.conversationId)
             && !this.candidates.has(message.params.conversationId)
           ) {
-            this.rememberCandidate(message.params.conversationId);
+            this.rememberCandidate(message.params.conversationId, true);
           }
         }
       };
