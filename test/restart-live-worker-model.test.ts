@@ -50,6 +50,7 @@ const workerSource = readFileSync(new URL('../src/worker.ts', import.meta.url), 
 const workerPoolSource = readFileSync(new URL('../src/core/worker-pool.ts', import.meta.url), 'utf8');
 const dashboardIpcSource = readFileSync(new URL('../src/core/dashboard-ipc-server.ts', import.meta.url), 'utf8');
 const daemonSource = readFileSync(new URL('../src/daemon.ts', import.meta.url), 'utf8');
+const commandHandlerSource = readFileSync(new URL('../src/core/command-handler.ts', import.meta.url), 'utf8');
 
 let sessionCounter = 0;
 
@@ -250,12 +251,12 @@ describe('worker restart case merges model into lastInitConfig (source pin)', ()
 
 describe('Codex App thread takeover clears the in-memory model override', () => {
   it('the takeover block that pins cliId=codex-app also clears spawnModelOverride', () => {
-    const pin = daemonSource.indexOf("ds.session.cliId = 'codex-app';");
+    const pin = commandHandlerSource.indexOf("current.session.cliId = 'codex-app';");
     expect(pin).toBeGreaterThanOrEqual(0);
     // 接管块紧随其后的几行：清 wrapper / 清 model 记录 / 清一次性覆盖 / 置 frozen。
-    const block = daemonSource.slice(pin, pin + 400);
-    expect(block).toContain('delete ds.session.model;');
-    expect(block).toContain('ds.spawnModelOverride = undefined;');
+    const block = commandHandlerSource.slice(pin, pin + 500);
+    expect(block).toContain('current.session.model = undefined;');
+    expect(block).toContain('current.spawnModelOverride = undefined;');
   });
 });
 
