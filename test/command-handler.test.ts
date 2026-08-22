@@ -4231,6 +4231,36 @@ describe('handleCommand', () => {
       );
     });
 
+    it('adopts an existing Codex App thread without overwriting its native title', async () => {
+      const ds = makeDaemonSession({
+        session: makeSession({
+          nativeSessionTitle: '[BotMux·Lark] 旧飞书标题',
+          nativeSessionTitleUserDefined: true,
+          nativeSessionTitleAwaitingContent: true,
+        }),
+      });
+      const deps = makeDeps(ds);
+
+      await startCodexAppThreadSession({
+        threadId: 'codex-thread-existing',
+        name: '原生 Codex 标题',
+        preview: '已有会话内容',
+        cwd: '/Users/test/AiProjects/project-a',
+      }, ds, deps, LARK_APP_ID);
+
+      expect(ds.session).toMatchObject({
+        cliId: 'codex-app',
+        cliSessionId: 'codex-thread-existing',
+        title: 'Codex App: 原生 Codex 标题',
+        workingDir: '/Users/test/AiProjects/project-a',
+      });
+      expect(ds.session.nativeSessionTitle).toBeUndefined();
+      expect(ds.session.nativeSessionTitleUserDefined).toBeUndefined();
+      expect(ds.session.nativeSessionTitleAwaitingContent).toBeUndefined();
+      expect(sessionStore.updateSession).toHaveBeenCalledWith(ds.session);
+      expect(forkWorker).toHaveBeenCalledWith(ds, '', true);
+    });
+
     it('refuses adopt while the session is still on the pendingRepo gate and posts a close-session card', async () => {
       const ds = makeDaemonSession({
         pendingRepo: true,

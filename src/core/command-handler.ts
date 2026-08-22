@@ -4375,6 +4375,11 @@ export async function startCodexAppThreadSession(
     current.session.cliId = 'codex-app';
     current.session.cliSessionId = thread.threadId;
     current.session.adoptedFrom = undefined;
+    // 接管已有原生 thread 时，标题所有权属于 Codex App。旧的 BotMux 托管标题
+    // 若继续进入 resume init，会反向覆盖用户在 App 中看到的原生标题。
+    current.session.nativeSessionTitle = undefined;
+    current.session.nativeSessionTitleUserDefined = undefined;
+    current.session.nativeSessionTitleAwaitingContent = undefined;
     sessionStore.updateSession(current.session);
     forkWorker(current, '', true);
     return { status: 'switched' as const, anchor: sessionAnchorId(current) };
