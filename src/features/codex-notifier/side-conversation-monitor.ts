@@ -7,6 +7,7 @@ import {
 import { createConnection, type Socket } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { codexSessionIdFromRolloutPath } from '../../services/codex-transcript.js';
 import { createCodexNotifierCompletionEvent } from './event.js';
 import { resolveCodexNotifierConfig, type ResolvedCodexNotifierConfig } from './config.js';
 import { enqueueCodexNotifierEvent } from './outbox.js';
@@ -31,6 +32,7 @@ const MAX_RECENT_THREAD_IDS = 64;
 const MAX_TRACKED_CONVERSATIONS = 128;
 const MAX_PENDING_SIDE_EVENTS = 256;
 const MAX_PENDING_SIDE_BYTES = 2 * 1024 * 1024;
+const CANDIDATE_STABILIZATION_MS = 1_500;
 const THREAD_STREAM_FOLLOWING_VERSION = 1;
 const MIN_DATE_MS = -8_640_000_000_000_000;
 const MAX_DATE_MS = 8_640_000_000_000_000;
@@ -473,6 +475,34 @@ export function listRecentCodexVisualizationThreads(
     .slice(0, Math.max(0, limit));
 }
 
+/** rollout 是普通 Codex App/CLI 线程的权威本地账本；Side Chat 不会写入这里。 */
+export function listRecentCodexRolloutThreadIds(
+  codexHome: string,
+  now = Date.now(),
+): Set<string> {
+  const root = join(codexHome, 'sessions');
+  const datePaths = new Set([
+    localDatePath(root, new Date(now)),
+    localDatePath(root, new Date(now - 24 * 60 * 60_000)),
+  ]);
+  const result = new Set<string>();
+  for (const path of datePaths) {
+    if (!existsSync(path)) continue;
+    let entries;
+    try {
+      entries = readdirSync(path, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const sessionId = codexSessionIdFromRolloutPath(entry.name);
+      if (sessionId) result.add(sessionId.toLowerCase());
+    }
+  }
+  return result;
+}
+
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise(resolve => {
     if (signal?.aborted) return resolve();
@@ -501,6 +531,7 @@ export interface CodexSideConversationMonitorOptions {
   userHome?: string;
   now?: () => number;
   scanIntervalMs?: number;
+  candidateStabilizationMs?: number;
   retryMs?: number;
   connectTimeoutMs?: number;
   initializeTimeoutMs?: number;
@@ -511,6 +542,7 @@ export interface CodexSideConversationMonitorOptions {
   detectLockState?: () => ScreenLockState;
   enqueue?: typeof enqueueCodexNotifierEvent;
   listThreads?: typeof listRecentCodexVisualizationThreads;
+  listRolloutThreadIds?: typeof listRecentCodexRolloutThreadIds;
   connect?: (path: string) => Socket;
 }
 
@@ -521,6 +553,7 @@ export class CodexSideConversationMonitor {
   private readonly socketPath: string;
   private readonly now: () => number;
   private readonly scanIntervalMs: number;
+  private readonly candidateStabilizationMs: number;
   private readonly retryMs: number;
   private readonly connectTimeoutMs: number;
   private readonly initializeTimeoutMs: number;
@@ -531,9 +564,11 @@ export class CodexSideConversationMonitor {
   private readonly detectLockState: () => ScreenLockState;
   private readonly enqueue: typeof enqueueCodexNotifierEvent;
   private readonly listThreads: typeof listRecentCodexVisualizationThreads;
+  private readonly listRolloutThreadIds: typeof listRecentCodexRolloutThreadIds;
   private readonly connect: (path: string) => Socket;
   private readonly tracker = new CodexSideConversationTracker();
   private readonly candidates = new Map<string, {
+    discoveredAtMs: number;
     notifyTerminalOnFirstSnapshot: boolean;
     terminalNotBeforeMs?: number;
   }>();
@@ -555,6 +590,8 @@ export class CodexSideConversationMonitor {
     this.socketPath = join(this.codexHome, 'ipc', 'ipc.sock');
     this.now = options.now ?? Date.now;
     this.scanIntervalMs = options.scanIntervalMs ?? SCAN_INTERVAL_MS;
+    this.candidateStabilizationMs = options.candidateStabilizationMs
+      ?? CANDIDATE_STABILIZATION_MS;
     this.retryMs = options.retryMs ?? IPC_RETRY_MS;
     this.connectTimeoutMs = options.connectTimeoutMs ?? IPC_CONNECT_TIMEOUT_MS;
     this.initializeTimeoutMs = options.initializeTimeoutMs ?? IPC_INITIALIZE_TIMEOUT_MS;
@@ -566,12 +603,36 @@ export class CodexSideConversationMonitor {
     if (!Number.isSafeInteger(this.maxPendingBytes) || this.maxPendingBytes <= 0) {
       throw new Error('codex_side_chat_pending_bytes_invalid');
     }
+    if (
+      !Number.isSafeInteger(this.candidateStabilizationMs)
+      || this.candidateStabilizationMs < 0
+    ) {
+      throw new Error('codex_side_chat_candidate_stabilization_invalid');
+    }
     this.logger = options.logger ?? console;
     this.readConfig = options.readConfig ?? resolveCodexNotifierConfig;
     this.detectLockState = options.detectLockState ?? detectScreenLock;
     this.enqueue = options.enqueue ?? enqueueCodexNotifierEvent;
     this.listThreads = options.listThreads ?? listRecentCodexVisualizationThreads;
+    this.listRolloutThreadIds = options.listRolloutThreadIds
+      ?? listRecentCodexRolloutThreadIds;
     this.connect = options.connect ?? (path => createConnection(path));
+  }
+
+  private rememberCandidate(conversationId: string): void {
+    if (this.candidates.has(conversationId)) return;
+    this.candidates.set(conversationId, {
+      discoveredAtMs: this.now(),
+      notifyTerminalOnFirstSnapshot: this.observationStartedAt !== undefined,
+      ...(this.observationStartedAt !== undefined
+        ? { terminalNotBeforeMs: this.observationStartedAt }
+        : {}),
+    });
+    while (this.candidates.size > MAX_TRACKED_CONVERSATIONS) {
+      const oldest = this.candidates.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.candidates.delete(oldest);
+    }
   }
 
   private enabled(): boolean {
@@ -718,21 +779,27 @@ export class CodexSideConversationMonitor {
         }
         this.startObservation();
         this.flushPending();
+        const ordinaryThreadIds = this.listRolloutThreadIds(this.codexHome, this.now());
+        for (const conversationId of ordinaryThreadIds) {
+          this.candidates.delete(conversationId);
+          ignore(conversationId);
+          unfollow(conversationId);
+        }
         for (const thread of this.listThreads(this.codexHome, this.now())) {
+          if (ordinaryThreadIds.has(thread.id.toLowerCase())) continue;
           if (ignored.has(thread.id)) continue;
           if (
             !followed.has(thread.id)
             && !this.tracker.has(thread.id)
             && !this.candidates.has(thread.id)
           ) {
-            this.candidates.set(thread.id, {
-              notifyTerminalOnFirstSnapshot: this.observationStartedAt !== undefined,
-              ...(this.observationStartedAt !== undefined
-                ? { terminalNotBeforeMs: this.observationStartedAt }
-                : {}),
-            });
+            this.rememberCandidate(thread.id);
           }
-          follow(thread.id);
+        }
+        for (const [conversationId, candidate] of this.candidates) {
+          if (ordinaryThreadIds.has(conversationId.toLowerCase())) continue;
+          if (this.now() - candidate.discoveredAtMs < this.candidateStabilizationMs) continue;
+          follow(conversationId);
         }
       };
       const handleState = (message: IpcMessage): void => {
@@ -804,7 +871,6 @@ export class CodexSideConversationMonitor {
           clientId = message.result.clientId;
           scan();
           if (settled) return;
-          for (const conversationId of this.candidates.keys()) follow(conversationId);
           scanTimer = setInterval(scan, this.scanIntervalMs);
           return;
         }
@@ -832,14 +898,8 @@ export class CodexSideConversationMonitor {
             !this.tracker.has(message.params.conversationId)
             && !this.candidates.has(message.params.conversationId)
           ) {
-            this.candidates.set(message.params.conversationId, {
-              notifyTerminalOnFirstSnapshot: this.observationStartedAt !== undefined,
-              ...(this.observationStartedAt !== undefined
-                ? { terminalNotBeforeMs: this.observationStartedAt }
-                : {}),
-            });
+            this.rememberCandidate(message.params.conversationId);
           }
-          follow(message.params.conversationId);
         }
       };
 

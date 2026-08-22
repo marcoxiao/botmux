@@ -3,6 +3,7 @@ import {
   mkdtempSync,
   rmSync,
   utimesSync,
+  writeFileSync,
 } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import type { Socket } from 'node:net';
@@ -14,6 +15,7 @@ import {
   CodexSideConversationMonitor,
   CodexSideConversationTracker,
   createSideConversationCompletionEvent,
+  listRecentCodexRolloutThreadIds,
   listRecentCodexVisualizationThreads,
 } from '../src/features/codex-notifier/index.js';
 
@@ -346,9 +348,103 @@ describe('Codex Side Chat candidate discovery', () => {
       mtimeMs: now - 1_000,
     }]);
   });
+
+  it('lists ordinary Codex App threads from the native rollout ledger', () => {
+    const codexHome = mkdtempSync(join(tmpdir(), 'botmux-codex-rollout-'));
+    tempDirs.push(codexHome);
+    const now = new Date(2026, 6, 24, 12, 0, 0).getTime();
+    const day = join(codexHome, 'sessions', '2026', '07', '24');
+    mkdirSync(day, { recursive: true });
+    writeFileSync(
+      join(day, `rollout-2026-07-24T08-00-00-${SIDE_THREAD_ID}.jsonl`),
+      '',
+    );
+    writeFileSync(join(day, 'not-a-rollout.jsonl'), '');
+
+    expect(listRecentCodexRolloutThreadIds(codexHome, now)).toEqual(
+      new Set([SIDE_THREAD_ID]),
+    );
+  });
 });
 
 describe('Codex Side Chat IPC monitor', () => {
+  it('waits for candidate stabilization and never follows a thread that gains a rollout', async () => {
+    const baselineAt = Date.parse('2026-07-24T08:00:00.000Z');
+    let now = baselineAt;
+    let ordinary = new Set<string>();
+    const controller = new AbortController();
+    const socket = new FakeIpcSocket();
+    initializeSocket(socket);
+    const monitor = new CodexSideConversationMonitor({
+      dataDir: '/tmp/botmux-side-chat-test',
+      platform: 'darwin',
+      now: () => now,
+      scanIntervalMs: 5,
+      candidateStabilizationMs: 1_000,
+      connectTimeoutMs: 100,
+      initializeTimeoutMs: 100,
+      readConfig: () => ({
+        enabled: true,
+        targetBotAppId: 'cli_test',
+        notifyWhen: 'always',
+      }),
+      listThreads: () => [{ id: SIDE_THREAD_ID, mtimeMs: baselineAt }],
+      listRolloutThreadIds: () => ordinary,
+      connect: () => asSocket(socket),
+    });
+
+    const connected = connectOnce(monitor, controller.signal);
+    await vi.waitFor(() => expect(socket.writes.some(frame =>
+      decodeFrame(frame).method === 'initialize')).toBe(true));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(socket.writes.some(frame =>
+      decodeFrame(frame).params?.following === true)).toBe(false);
+
+    ordinary = new Set([SIDE_THREAD_ID]);
+    now = baselineAt + 2_000;
+    await new Promise(resolve => setTimeout(resolve, 15));
+    expect(socket.writes.some(frame =>
+      decodeFrame(frame).params?.following === true)).toBe(false);
+
+    controller.abort();
+    await connected;
+  });
+
+  it('unfollows a candidate when a native rollout appears after subscription', async () => {
+    const baselineAt = Date.parse('2026-07-24T08:00:00.000Z');
+    let ordinary = new Set<string>();
+    const controller = new AbortController();
+    const socket = new FakeIpcSocket();
+    initializeSocket(socket);
+    const monitor = new CodexSideConversationMonitor({
+      dataDir: '/tmp/botmux-side-chat-test',
+      platform: 'darwin',
+      now: () => baselineAt,
+      scanIntervalMs: 5,
+      candidateStabilizationMs: 0,
+      connectTimeoutMs: 100,
+      initializeTimeoutMs: 100,
+      readConfig: () => ({
+        enabled: true,
+        targetBotAppId: 'cli_test',
+        notifyWhen: 'always',
+      }),
+      listThreads: () => [{ id: SIDE_THREAD_ID, mtimeMs: baselineAt }],
+      listRolloutThreadIds: () => ordinary,
+      connect: () => asSocket(socket),
+    });
+
+    const connected = connectOnce(monitor, controller.signal);
+    await vi.waitFor(() => expect(socket.writes.some(frame =>
+      decodeFrame(frame).params?.following === true)).toBe(true));
+    ordinary = new Set([SIDE_THREAD_ID]);
+    await vi.waitFor(() => expect(socket.writes.some(frame =>
+      decodeFrame(frame).params?.following === false)).toBe(true));
+
+    controller.abort();
+    await connected;
+  });
+
   it('resets observation state while disabled and does not backfill during the disabled window', async () => {
     const sockets: FakeIpcSocket[] = [];
     const controller = new AbortController();
@@ -363,6 +459,7 @@ describe('Codex Side Chat IPC monitor', () => {
       signal: controller.signal,
       platform: 'darwin',
       scanIntervalMs: 5,
+      candidateStabilizationMs: 0,
       retryMs: 1,
       connectTimeoutMs: 100,
       initializeTimeoutMs: 100,
@@ -447,6 +544,7 @@ describe('Codex Side Chat IPC monitor', () => {
       platform: 'darwin',
       now: () => now,
       scanIntervalMs: 5,
+      candidateStabilizationMs: 0,
       connectTimeoutMs: 100,
       initializeTimeoutMs: 100,
       readConfig: () => ({
@@ -521,6 +619,7 @@ describe('Codex Side Chat IPC monitor', () => {
       platform: 'darwin',
       now: () => now,
       scanIntervalMs: 5,
+      candidateStabilizationMs: 0,
       connectTimeoutMs: 100,
       initializeTimeoutMs: 100,
       maxPendingEvents: 1,
@@ -622,6 +721,7 @@ describe('Codex Side Chat IPC monitor', () => {
       platform: 'darwin',
       now: () => now,
       scanIntervalMs: 5,
+      candidateStabilizationMs: 0,
       connectTimeoutMs: 100,
       initializeTimeoutMs: 100,
       readConfig: () => ({

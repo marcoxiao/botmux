@@ -104,6 +104,7 @@ export {
   CodexSideConversationMonitor,
   CodexSideConversationTracker,
   createSideConversationCompletionEvent,
+  listRecentCodexRolloutThreadIds,
   listRecentCodexVisualizationThreads,
   runCodexSideConversationMonitor,
   type CodexConversationPatch,
