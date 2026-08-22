@@ -3,6 +3,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:chil
 import { Buffer } from 'node:buffer';
 import { createConnection, type Socket } from 'node:net';
 import type { KeyObject } from 'node:crypto';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { CodexAppTurnInput } from './types.js';
 import {
   buildCodexAppTurnStartParams,
@@ -33,6 +34,10 @@ import {
   TurnTokenUsageAccumulator,
   parseTokenUsagePair,
 } from './services/codex-app-token-usage.js';
+import {
+  normalizeTurnProgressFact,
+  type TurnProgressFactV1,
+} from './core/turn-progress/protocol.js';
 
 type JsonObject = Record<string, any>;
 
@@ -867,6 +872,91 @@ function emitTurnActivity(turn: ActiveTurn, phase: 'submitted' | 'progress' | 'c
   });
 }
 
+type RunnerProgressFact =
+  | { kind: 'turn_started' }
+  | { kind: 'narrative'; text: string }
+  | { kind: 'operation'; operation: NonNullable<TurnProgressFactV1['operation']> };
+
+function emitTurnProgressFact(turn: ActiveTurn, fact: RunnerProgressFact): void {
+  const replyTurnId = turn.accepted?.[0]?.replyTurnId;
+  if (!replyTurnId) return;
+  // emitMarker increments synchronously, so the fact and its signed envelope
+  // carry one sequence identity. The worker still overwrites seq from the
+  // verified envelope before forwarding IPC (defense in depth).
+  const normalized = normalizeTurnProgressFact({
+    schemaVersion: 1,
+    seq: controlSeq + 1,
+    atMs: Date.now(),
+    ...fact,
+  }, args.cwd);
+  if (normalized) emitMarker('turn-progress', { replyTurnId, fact: normalized });
+}
+
+function progressOutcome(item: JsonObject): 'succeeded' | 'failed' | 'cancelled' {
+  const status = typeof item?.status === 'string' ? item.status.toLowerCase() : '';
+  if (status === 'cancelled' || status === 'canceled' || status === 'interrupted') return 'cancelled';
+  if (status === 'failed' || status === 'error' || item?.error != null
+      || typeof item?.exitCode === 'number' && item.exitCode !== 0) return 'failed';
+  return 'succeeded';
+}
+
+function progressFileSubjects(item: JsonObject): string[] | undefined {
+  const root = resolve(args.cwd);
+  const candidates = [
+    ...(Array.isArray(item?.changes) ? item.changes.map((change: JsonObject) => change?.path) : []),
+    ...(Array.isArray(item?.files) ? item.files : []),
+    item?.path,
+  ];
+  const subjects = candidates.flatMap(value => {
+    if (typeof value !== 'string') return [];
+    const absolute = resolve(root, value);
+    const path = relative(root, absolute);
+    if (!path || path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path)) return [];
+    return [path.split(sep).join('/')];
+  }).slice(0, 3);
+  return subjects.length > 0 ? subjects : undefined;
+}
+
+function emitItemProgress(
+  turn: ActiveTurn,
+  item: JsonObject,
+  phase: 'started' | 'completed',
+): void {
+  const id = typeof item?.id === 'string' ? item.id : undefined;
+  const outcome = phase === 'completed' ? progressOutcome(item) : undefined;
+  if (item?.type === 'commandExecution') {
+    emitTurnProgressFact(turn, {
+      kind: 'operation',
+      operation: { ...(id ? { id } : {}), type: 'command', phase, ...(outcome ? { outcome } : {}) },
+    });
+    return;
+  }
+  if (item?.type === 'fileChange') {
+    const subjects = progressFileSubjects(item);
+    emitTurnProgressFact(turn, {
+      kind: 'operation',
+      operation: {
+        ...(id ? { id } : {}), type: 'file_change', phase,
+        ...(subjects ? { subjects } : {}),
+        ...(outcome ? { outcome } : {}),
+      },
+    });
+    return;
+  }
+  if (item?.type === 'mcpToolCall') {
+    const subjects = [item.server, item.tool].filter((value): value is string =>
+      typeof value === 'string' && value.trim().length > 0);
+    emitTurnProgressFact(turn, {
+      kind: 'operation',
+      operation: {
+        ...(id ? { id } : {}), type: 'mcp', phase,
+        ...(subjects.length > 0 ? { subjects } : {}),
+        ...(outcome ? { outcome } : {}),
+      },
+    });
+  }
+}
+
 function handleServerRequest(msg: JsonObject): boolean {
   const method = msg.method;
   if (method === 'item/commandExecution/requestApproval') {
@@ -1338,6 +1428,7 @@ function handleNotification(msg: JsonObject, replayedAfterResponse = false): voi
 
   if (msg.method === 'item/started') {
     const item = params.item;
+    emitItemProgress(turn, item, 'started');
     if (item?.type === 'commandExecution') {
       writeLine(`\n$ ${item.command}`);
     } else if (item?.type === 'fileChange') {
@@ -1364,10 +1455,13 @@ function handleNotification(msg: JsonObject, replayedAfterResponse = false): voi
     const item = params.item;
     if (item?.type === 'agentMessage') {
       if (item.phase === 'final_answer') turn.finalText = String(item.text ?? '');
-      else if (!turn.itemText.has(item.id) && item.text) {
-        turn.allAgentText += String(item.text);
+      else {
+        if (typeof item.text === 'string') {
+          emitTurnProgressFact(turn, { kind: 'narrative', text: item.text });
+        }
+        if (!turn.itemText.has(item.id) && item.text) turn.allAgentText += String(item.text);
       }
-    }
+    } else emitItemProgress(turn, item, 'completed');
     return;
   }
 }
@@ -1975,6 +2069,7 @@ async function runTurn(message: QueuedInput): Promise<void> {
   activeTurn = turn;
   // This edge proves the runner decoded and dequeued Botmux's control line,
   // even if app-server stalls before acknowledging turn/start.
+  emitTurnProgressFact(turn, { kind: 'turn_started' });
   emitTurnActivity(turn, 'submitted', true);
   let built = buildCodexAppTurnStartParams({
     threadId: tid,

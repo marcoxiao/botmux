@@ -554,7 +554,7 @@ function readRequests(logPath: string): Array<Record<string, any>> {
 
 async function exerciseRunner(opts: {
   version: string;
-  behavior?: 'success' | 'capability-error' | 'generic-error' | 'osc-injection' | 'empty-final' | 'start-response-last';
+  behavior?: 'success' | 'capability-error' | 'generic-error' | 'osc-injection' | 'empty-final' | 'start-response-last' | 'progress-facts';
   includeMissingImage?: boolean;
   includeSidecar?: boolean;
   turnCount?: number;
@@ -800,6 +800,62 @@ describe('codex-app-runner app-server protocol integration', { timeout: 120_000,
     );
     expect(idleMarkerIndexes[1]).toBeGreaterThan(lastCompletedIndex);
     expect(idleMarkerIndexes[1]).toBeGreaterThan(lastFinalEndIndex);
+  });
+
+  it('emits only whitelisted semantic progress facts on the signed channel', async () => {
+    const result = await exerciseRunner({ version: '0.136.0', behavior: 'progress-facts' });
+    const facts = result.markers
+      .filter(marker => marker.kind === 'turn-progress')
+      .map(marker => marker.payload.fact);
+
+    expect(facts).toEqual([
+      expect.objectContaining({ kind: 'turn_started' }),
+      expect.objectContaining({
+        kind: 'operation',
+        operation: { id: 'cmd-1', type: 'command', phase: 'started' },
+      }),
+      expect.objectContaining({ kind: 'narrative', text: '正在检查实现' }),
+      expect.objectContaining({
+        kind: 'operation',
+        operation: { id: 'cmd-1', type: 'command', phase: 'completed', outcome: 'succeeded' },
+      }),
+      expect.objectContaining({
+        kind: 'operation',
+        operation: {
+          id: 'file-1', type: 'file_change', phase: 'started',
+          subjects: ['src/index.ts', 'README.md'],
+        },
+      }),
+      expect.objectContaining({
+        kind: 'operation',
+        operation: {
+          id: 'file-1', type: 'file_change', phase: 'completed',
+          subjects: ['src/index.ts', 'README.md'], outcome: 'succeeded',
+        },
+      }),
+      expect.objectContaining({
+        kind: 'operation',
+        operation: {
+          id: 'mcp-1', type: 'mcp', phase: 'started',
+          subjects: ['filesystem', 'read_file'],
+        },
+      }),
+      expect.objectContaining({
+        kind: 'operation',
+        operation: {
+          id: 'mcp-1', type: 'mcp', phase: 'completed',
+          subjects: ['filesystem', 'read_file'], outcome: 'succeeded',
+        },
+      }),
+    ]);
+    const progressMarkers = result.markers.filter(marker => marker.kind === 'turn-progress');
+    expect(progressMarkers.every(marker => marker.payload.replyTurnId === 'om_integration_123')).toBe(true);
+    const serialized = JSON.stringify(progressMarkers);
+    expect(serialized).not.toContain('printenv');
+    expect(serialized).not.toContain('command output');
+    expect(serialized).not.toContain('/private/secret');
+    expect(serialized).not.toContain('private tool result');
+    expect(serialized).not.toContain('chain of thought');
   });
 
   it('emits a zero-chunk final transaction for an empty answer before the signed idle boundary', async () => {

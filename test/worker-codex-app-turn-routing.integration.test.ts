@@ -181,6 +181,87 @@ function readRequests(path: string): Array<Record<string, any>> {
 }
 
 describe('Codex App worker queued-turn attribution', () => {
+  it('forwards signed progress facts with worker-owned turn identity and no sensitive payloads', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'botmux-worker-codex-progress-'));
+    tempDirs.add(root);
+    const fakeCodex = join(root, 'fake-codex');
+    const requestLog = join(root, 'requests.jsonl');
+    copyFileSync(resolve('test/fixtures/fake-codex-app-server.mjs'), fakeCodex);
+    chmodSync(fakeCodex, 0o755);
+    const sessionId = `codex-progress-${process.pid}-${Date.now()}`;
+    const logs: string[] = [];
+    const messages: WorkerToDaemon[] = [];
+    const child = spawn(process.execPath, ['--import', 'tsx', resolve('src/worker.ts')], {
+      cwd: resolve('.'),
+      env: {
+        ...process.env,
+        HOME: root,
+        NODE_ENV: 'test',
+        NODE_OPTIONS: [process.env.NODE_OPTIONS, '--import=tsx'].filter(Boolean).join(' '),
+        BOTMUX_TEST_CODEX_APP_RUNNER_PATH: resolve('src/codex-app-runner.ts'),
+        SESSION_DATA_DIR: root,
+        BOTMUX_SESSION_ID: sessionId,
+        LARK_APP_ID: 'app_worker_progress',
+        LARK_APP_SECRET: 'secret',
+        FAKE_CODEX_LOG: requestLog,
+        FAKE_CODEX_VERSION: '0.136.0',
+        FAKE_CODEX_BEHAVIOR: 'progress-facts',
+      },
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    });
+    children.add(child);
+    child.stdout?.on('data', chunk => logs.push(chunk.toString()));
+    child.stderr?.on('data', chunk => logs.push(chunk.toString()));
+    child.on('message', raw => messages.push(raw as WorkerToDaemon));
+
+    try {
+      child.send({
+        type: 'init',
+        sessionId,
+        chatId: 'oc_worker_progress',
+        rootMessageId: 'om_worker_progress_root',
+        workingDir: resolve('.'),
+        cliId: 'codex-app',
+        cliPathOverride: fakeCodex,
+        backendType: 'pty',
+        prompt: '<user_message>progress turn</user_message>',
+        promptCodexAppInput: { text: 'progress turn', clientUserMessageId: 'om_worker_progress_1' },
+        larkAppId: 'app_worker_progress',
+        larkAppSecret: 'secret',
+        turnId: 'om_worker_progress_1',
+        dispatchAttempt: 7,
+      } satisfies DaemonToWorker);
+      await waitFor(child, logs, () => (
+        messages.filter(message => message.type === 'turn_progress').length === 8
+        && messages.some(message => message.type === 'final_output')
+      ), 10_000);
+
+      const progress = messages.filter(
+        (message): message is Extract<WorkerToDaemon, { type: 'turn_progress' }> =>
+          message.type === 'turn_progress',
+      );
+      expect(progress.every(message =>
+        message.sessionId === sessionId
+        && message.turnId === 'om_worker_progress_1'
+        && message.dispatchAttempt === 7)).toBe(true);
+      expect(progress.every((message, index) => (
+        index === 0 || message.fact.seq > progress[index - 1]!.fact.seq
+      ))).toBe(true);
+      expect(progress.map(message => message.fact.kind)).toEqual([
+        'turn_started', 'operation', 'narrative', 'operation',
+        'operation', 'operation', 'operation', 'operation',
+      ]);
+      const serialized = JSON.stringify(progress);
+      expect(serialized).not.toContain('printenv');
+      expect(serialized).not.toContain('command output');
+      expect(serialized).not.toContain('/private/secret');
+      expect(serialized).not.toContain('private tool result');
+      expect(serialized).not.toContain('chain of thought');
+    } finally {
+      await stopChild(child);
+    }
+  }, 15_000);
+
   it('routes and ACKs turn N before N+1 after both inputs were written in one flush', async () => {
     const root = mkdtempSync(join(tmpdir(), 'botmux-worker-codex-routing-'));
     tempDirs.add(root);
@@ -570,6 +651,11 @@ describe('Codex App worker queued-turn attribution', () => {
         .filter(r => r.method === 'turn/start' || r.method === 'turn/steer')
         .map(r => r.method);
       expect(turnMethods).toEqual(['turn/start', 'turn/steer', 'turn/steer']);
+      const starts = messages.filter(
+        (message): message is Extract<WorkerToDaemon, { type: 'turn_progress' }> =>
+          message.type === 'turn_progress' && message.fact.kind === 'turn_started',
+      );
+      expect(starts.map(message => message.turnId)).toEqual(['om_sup_1']);
       expect(logs.join('')).not.toContain('rejected final marker');
     } finally {
       await stopChild(child);

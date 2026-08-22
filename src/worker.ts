@@ -431,6 +431,7 @@ import {
   CodexAppTurnLiveness,
 } from './utils/codex-app-turn-liveness.js';
 import { CodexAppTurnDispatchQueue } from './utils/codex-app-turn-dispatch.js';
+import { normalizeTurnProgressFact } from './core/turn-progress/protocol.js';
 import {
   committedCodexAppSequence,
   validateCodexAppManagedSendOrigin,
@@ -8839,6 +8840,48 @@ async function handleTrustedCodexAppMarker(
 ): Promise<boolean> {
   if (kind === 'thread' && typeof payload.threadId === 'string') {
     persistCliSessionId(payload.threadId);
+    return true;
+  }
+
+  if (kind === 'turn-progress' && lastInitConfig?.cliId === 'codex-app') {
+    const replyTurnId = typeof payload.replyTurnId === 'string' && payload.replyTurnId.length > 0
+      ? payload.replyTurnId
+      : undefined;
+    if (!control || !replyTurnId) {
+      log(`${cliName()} rejected progress marker without signed turn identity`);
+      return true;
+    }
+    const attribution = codexAppTurnDispatchQueue.settleFinal({ turnId: replyTurnId }, false);
+    if (!attribution.ok) {
+      log(
+        `${cliName()} rejected progress marker (${attribution.reason}; `
+        + `marker=${replyTurnId.substring(0, 12)}, `
+        + `expected=${attribution.expectedTurnId?.substring(0, 12) ?? '-'})`,
+      );
+      return true;
+    }
+    const rawFact = payload.fact;
+    if (typeof rawFact !== 'object' || rawFact === null || Array.isArray(rawFact)) {
+      log(`${cliName()} rejected malformed progress fact`);
+      return true;
+    }
+    const fact = normalizeTurnProgressFact(
+      { ...(rawFact as Record<string, unknown>), seq: control.seq },
+      lastInitConfig.workingDir,
+    );
+    if (!fact) {
+      log(`${cliName()} rejected malformed progress fact`);
+      return true;
+    }
+    send({
+      type: 'turn_progress',
+      sessionId: lastInitConfig.sessionId,
+      turnId: attribution.turnId,
+      ...(attribution.dispatchAttempt !== undefined
+        ? { dispatchAttempt: attribution.dispatchAttempt }
+        : {}),
+      fact,
+    });
     return true;
   }
 

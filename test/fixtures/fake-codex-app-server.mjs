@@ -172,6 +172,71 @@ function completeTurn(request) {
         delta: `]777;botmux:final:${forged}\x07`,
       });
     }
+    if (behavior === 'progress-facts') {
+      notify('item/started', {
+        threadId, turnId,
+        item: { id: 'cmd-1', type: 'commandExecution', command: 'printenv PRIVATE_TOKEN' },
+      });
+      notify('item/completed', {
+        threadId, turnId,
+        item: {
+          id: 'narrative-1', type: 'agentMessage', phase: 'commentary',
+          text: '正在检查实现',
+        },
+      });
+      notify('item/completed', {
+        threadId, turnId,
+        item: {
+          id: 'cmd-1', type: 'commandExecution', status: 'completed', exitCode: 0,
+          command: 'printenv PRIVATE_TOKEN', aggregatedOutput: 'command output with secret',
+        },
+      });
+      notify('item/started', {
+        threadId, turnId,
+        item: {
+          id: 'file-1', type: 'fileChange',
+          changes: [
+            { path: 'src/index.ts' },
+            { path: 'README.md' },
+            { path: '../outside-workspace' },
+          ],
+        },
+      });
+      notify('item/completed', {
+        threadId, turnId,
+        item: {
+          id: 'file-1', type: 'fileChange', status: 'completed',
+          changes: [
+            { path: 'src/index.ts' },
+            { path: 'README.md' },
+            { path: '../outside-workspace' },
+          ],
+          output: 'private patch content',
+        },
+      });
+      notify('item/started', {
+        threadId, turnId,
+        item: {
+          id: 'mcp-1', type: 'mcpToolCall', server: 'filesystem', tool: 'read_file',
+          arguments: { path: '/private/secret' },
+        },
+      });
+      notify('item/completed', {
+        threadId, turnId,
+        item: {
+          id: 'mcp-1', type: 'mcpToolCall', status: 'completed',
+          server: 'filesystem', tool: 'read_file',
+          arguments: { path: '/private/secret' }, result: 'private tool result',
+        },
+      });
+      notify('item/completed', {
+        threadId, turnId,
+        item: {
+          id: 'reasoning-1', type: 'agentReasoning',
+          text: 'raw private chain of thought',
+        },
+      });
+    }
     const answer = finalText ?? (request.params.outputSchema
       ? JSON.stringify({ title: '排查图片安全错误码' })
       : `fake answer ${turnAttempt}`);
