@@ -169,6 +169,7 @@ Core 交给插件的 `TurnProgressEventV1` 由 `TurnProgressFactV1` 与现有事
 
 - `turn_progress` IPC 提供 started、narrative、operation；
 - `tui_prompt` / `tui_prompt_resolved` 提供 waiting/resumed；
+- `steer_accepted` 不进入 reducer，只把该补充消息的 turn ID 绑定为当前执行单元的成员别名；
 - `turn_terminal` 提供 completed/failed/cancelled/ambiguous 终态；当本轮没有可交付的 `final_output` 时，它负责把卡片冻结为对应终态；
 - `final_output` 提供 canonical final delivery，不重新包装一份 terminal IPC。
 
@@ -198,7 +199,7 @@ Core 的 delivery host 只负责：单在途、latest pending snapshot、两秒�
 Card binding 只保存以下交付元数据，不保存推理或终端内容：
 
 - plugin ID；
-- session/turn/attempt 身份；
+- primary card-owning turn/attempt 身份，以及有界的 ordered-steer member turn ID 别名；
 - card entity ID；
 - Lark message ID；
 - 最新成功 sequence；
@@ -280,7 +281,7 @@ Codex App notifications / TRAE rollout
   → Core delivery host full-card latest-wins update
 ```
 
-Codex App ordered steer 不创建第二张卡：补充消息继续归属于当前实际执行单元。若消息排队后成为新的独立执行单元，则在其 `turn_started` 时创建下一张卡。
+Codex App ordered steer 不创建第二张卡：现有 `steer_accepted` 将补充消息的 turn ID 加入当前 binding 的有界成员别名，后续 progress/terminal/final 命中任一成员都归入同一执行单元；`steer_superseded` 只结算成员，不冻结卡片。最终 `✅` 始终加在 primary card-owning 用户消息上。若消息排队后成为新的独立执行单元，则在其 `turn_started` 时创建下一张卡。
 
 ## 9. 最终交付与幂等
 
