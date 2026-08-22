@@ -157,6 +157,29 @@ describe('Codex notifier delivery coordinator', () => {
     expect(replyMessage).not.toHaveBeenCalled();
   });
 
+  it('retries the same root UUID when route persistence fails after Lark accepts the card', async () => {
+    const { coordinator, routeStore, sendMessage, sendUserMessage } = createHarness();
+    const completion = event('bind-retry');
+    const bind = vi.spyOn(routeStore, 'bind');
+    bind.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    await expect(coordinator.deliver(completion, 'oc_workbench')).rejects.toThrow('disk full');
+    await expect(coordinator.deliver(completion, 'oc_workbench')).resolves.toEqual({
+      destination: 'group',
+      messageId: 'om_root',
+    });
+
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(sendMessage.mock.calls.map(call => call[4])).toEqual([
+      codexNotifierMessageUuid(completion.eventId),
+      codexNotifierMessageUuid(completion.eventId),
+    ]);
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    expect(routeStore.get(completion.threadId, 'oc_workbench')?.rootMessageId).toBe('om_root');
+  });
+
   it('does not serialize independent threads', async () => {
     const { coordinator, sendMessage } = createHarness();
     const first = deferred<string>();
