@@ -6,6 +6,7 @@ import {
 export interface ResolvedCodexNotifierConfig {
   enabled: boolean;
   targetBotAppId?: string;
+  targetChatId?: string;
   notifyWhen: CodexNotifierNotifyWhen;
 }
 
@@ -15,6 +16,7 @@ export function resolveCodexNotifierConfig(): ResolvedCodexNotifierConfig {
   return {
     enabled: config?.enabled === true,
     ...(config?.targetBotAppId ? { targetBotAppId: config.targetBotAppId } : {}),
+    ...(config?.targetChatId ? { targetChatId: config.targetChatId } : {}),
     notifyWhen: config?.notifyWhen === 'always' ? 'always' : 'locked_only',
   };
 }

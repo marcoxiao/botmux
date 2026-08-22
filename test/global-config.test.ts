@@ -244,6 +244,7 @@ describe('global dashboard config', () => {
       codexNotifier: {
         enabled: true,
         targetBotAppId: ' cli_notify ',
+        targetChatId: ' oc_workbench ',
         notifyWhen: 'always',
         futureSetting: 'keep-compatible',
       },
@@ -252,11 +253,13 @@ describe('global dashboard config', () => {
     expect(readGlobalConfig().codexNotifier).toEqual({
       enabled: true,
       targetBotAppId: 'cli_notify',
+      targetChatId: 'oc_workbench',
       notifyWhen: 'always',
     });
     expect(resolveCodexNotifierConfig()).toEqual({
       enabled: true,
       targetBotAppId: 'cli_notify',
+      targetChatId: 'oc_workbench',
       notifyWhen: 'always',
     });
   });
@@ -266,6 +269,7 @@ describe('global dashboard config', () => {
       codexNotifier: {
         enabled: true,
         targetBotAppId: 'cli_old',
+        targetChatId: 'oc_old',
         notifyWhen: 'locked_only',
         futureSetting: { version: 2 },
       },
@@ -293,6 +297,7 @@ describe('global dashboard config', () => {
       codexNotifier: {
         enabled: 'yes',
         targetBotAppId: '   ',
+        targetChatId: '   ',
         notifyWhen: 'unlocked',
       },
     }));

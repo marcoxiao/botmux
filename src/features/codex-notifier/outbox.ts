@@ -26,6 +26,7 @@ const EVENT_FILE_PATTERN = /^[a-f0-9]{64}\.json$/;
 const OUTBOX_ITEM_KEYS = new Set([
   'schemaVersion',
   'targetBotAppId',
+  'targetChatId',
   'clientSurface',
   'conversationKind',
   'event',
@@ -50,6 +51,7 @@ type PersistedCodexNotifierEvent = Omit<
 export interface CodexNotifierOutboxItem {
   schemaVersion: 1;
   targetBotAppId: string;
+  targetChatId?: string;
   clientSurface?: CodexClientSurface;
   conversationKind?: CodexConversationKind;
   event: PersistedCodexNotifierEvent;
@@ -71,6 +73,16 @@ export function parseCodexNotifierOutboxItem(value: unknown): CodexNotifierOutbo
   if (item.schemaVersion !== 1) throw new Error('codex_notifier_outbox_schema_unsupported');
   if (typeof item.targetBotAppId !== 'string' || !item.targetBotAppId.trim() || item.targetBotAppId.length > 256) {
     throw new Error('codex_notifier_outbox_target_invalid');
+  }
+  if (
+    item.targetChatId !== undefined
+    && (
+      typeof item.targetChatId !== 'string'
+      || !item.targetChatId.trim()
+      || item.targetChatId.length > 256
+    )
+  ) {
+    throw new Error('codex_notifier_outbox_chat_target_invalid');
   }
   if (
     item.clientSurface !== undefined
@@ -107,6 +119,9 @@ export function parseCodexNotifierOutboxItem(value: unknown): CodexNotifierOutbo
   return {
     schemaVersion: 1,
     targetBotAppId: item.targetBotAppId.trim(),
+    ...(typeof item.targetChatId === 'string'
+      ? { targetChatId: item.targetChatId.trim() }
+      : {}),
     ...(clientSurface ? { clientSurface } : {}),
     ...(conversationKind ? { conversationKind } : {}),
     event,
@@ -170,10 +185,12 @@ export function enqueueCodexNotifierEvent(
   dataDir: string,
   targetBotAppId: string,
   event: CodexTaskCompletedEvent,
+  targetChatId?: string,
 ): string {
   const item = parseCodexNotifierOutboxItem({
     schemaVersion: 1,
     targetBotAppId,
+    ...(targetChatId !== undefined ? { targetChatId } : {}),
     ...(event.clientSurface ? { clientSurface: event.clientSurface } : {}),
     ...(event.conversationKind ? { conversationKind: event.conversationKind } : {}),
     event,

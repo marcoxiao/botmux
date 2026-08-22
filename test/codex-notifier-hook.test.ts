@@ -41,6 +41,7 @@ function userPromptPayload(overrides: Record<string, unknown> = {}): Record<stri
 const enabledConfig = {
   enabled: true,
   targetBotAppId: 'cli_target',
+  targetChatId: 'oc_workbench',
   notifyWhen: 'locked_only' as const,
 };
 
@@ -452,9 +453,10 @@ describe('Codex notifier Stop Hook', () => {
 
     expect(outcome).toBe('enqueued');
     expect(enqueue).toHaveBeenCalledTimes(1);
-    const [dataDir, targetBotAppId, event] = enqueue.mock.calls[0];
+    const [dataDir, targetBotAppId, event, targetChatId] = enqueue.mock.calls[0];
     expect(dataDir).toBe('/tmp/botmux-data');
     expect(targetBotAppId).toBe('cli_target');
+    expect(targetChatId).toBe('oc_workbench');
     expect(event).toMatchObject({
       source: 'codex-desktop',
       clientSurface: 'codex-app',

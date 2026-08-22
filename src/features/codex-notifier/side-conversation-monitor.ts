@@ -580,6 +580,7 @@ export class CodexSideConversationMonitor {
   private readonly pending = new Map<string, {
     event: CodexTaskCompletedEvent;
     targetBotAppId: string;
+    targetChatId?: string;
     bytes: number;
   }>();
   private pendingBytes = 0;
@@ -675,6 +676,7 @@ export class CodexSideConversationMonitor {
       const item = {
         event,
         targetBotAppId: config.targetBotAppId,
+        ...(config.targetChatId ? { targetChatId: config.targetChatId } : {}),
       };
       const bytes = Buffer.byteLength(JSON.stringify(item), 'utf8');
       if (
@@ -695,7 +697,12 @@ export class CodexSideConversationMonitor {
   private flushPending(): void {
     for (const [eventId, item] of this.pending) {
       try {
-        this.enqueue(this.options.dataDir, item.targetBotAppId, item.event);
+        this.enqueue(
+          this.options.dataDir,
+          item.targetBotAppId,
+          item.event,
+          item.targetChatId,
+        );
         this.pending.delete(eventId);
         this.pendingBytes = Math.max(0, this.pendingBytes - item.bytes);
         this.logger.debug(`[codex-notifier] Side Chat 完成事件已入队: ${eventId.slice(0, 12)}`);

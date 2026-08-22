@@ -146,7 +146,7 @@ export function processCodexNotifierHookPayload(
       : context.lastAssistantMessage,
   });
   const enqueue = deps.enqueue ?? enqueueCodexNotifierEvent;
-  enqueue(dataDir, config.targetBotAppId, event);
+  enqueue(dataDir, config.targetBotAppId, event, config.targetChatId);
   discardConfirmedTurn();
   return 'enqueued';
 }

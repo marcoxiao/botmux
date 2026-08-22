@@ -630,11 +630,14 @@ describe('Codex Side Chat IPC monitor', () => {
     const baselineAt = Date.parse('2026-07-24T08:00:00.000Z');
     let now = baselineAt;
     let enqueueFails = true;
+    let targetChatId = 'oc_original';
     const accepted: string[] = [];
+    const acceptedTargets: Array<string | undefined> = [];
     const warnings: string[] = [];
-    const enqueue = vi.fn((_dataDir, _targetBotAppId, event) => {
+    const enqueue = vi.fn((_dataDir, _targetBotAppId, event, frozenTargetChatId) => {
       if (enqueueFails) throw new Error('disk full');
       accepted.push(event.nativeTurnId);
+      acceptedTargets.push(frozenTargetChatId);
       return '/tmp/outbox.json';
     });
     const states = new Map([
@@ -692,6 +695,7 @@ describe('Codex Side Chat IPC monitor', () => {
       readConfig: () => ({
         enabled: true,
         targetBotAppId: 'cli_test',
+        targetChatId,
         notifyWhen: 'always',
       }),
       listThreads: () => [
@@ -706,8 +710,10 @@ describe('Codex Side Chat IPC monitor', () => {
     await vi.waitFor(() => expect(
       warnings.some(message => message.includes('内存待入队已达上限')),
     ).toBe(true));
+    targetChatId = 'oc_changed';
     enqueueFails = false;
     await vi.waitFor(() => expect(accepted).toEqual(['turn-side']));
+    expect(acceptedTargets).toEqual(['oc_original']);
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(accepted).not.toContain('turn-new');
 

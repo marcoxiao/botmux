@@ -68,20 +68,28 @@ describe('Codex notifier outbox', () => {
     expect(listCodexNotifierOutbox(dataDir)).toEqual([]);
   });
 
-  it('atomically freezes the first target and deduplicates by stable event id', () => {
+  it('atomically freezes the first bot and chat target by stable event id', () => {
     const dataDir = newDataDir();
     const event = completionEvent();
-    const firstPath = enqueueCodexNotifierEvent(dataDir, 'cli_first', event);
-    const secondPath = enqueueCodexNotifierEvent(dataDir, 'cli_second', event);
+    const firstPath = enqueueCodexNotifierEvent(dataDir, 'cli_first', event, 'oc_first');
+    const secondPath = enqueueCodexNotifierEvent(dataDir, 'cli_second', event, 'oc_second');
 
     expect(secondPath).toBe(firstPath);
     expect(listCodexNotifierOutbox(dataDir)).toHaveLength(1);
     expect(readCodexNotifierOutboxItem(firstPath)).toEqual({
       schemaVersion: 1,
       targetBotAppId: 'cli_first',
+      targetChatId: 'oc_first',
       event,
     });
     expect(statSync(firstPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('keeps an absent targetChatId as an explicit DM destination', () => {
+    const dataDir = newDataDir();
+    const path = enqueueCodexNotifierEvent(dataDir, 'cli_target', completionEvent());
+
+    expect(readCodexNotifierOutboxItem(path)).not.toHaveProperty('targetChatId');
   });
 
   it('rejects malformed targets and forged event identities', () => {
@@ -90,6 +98,18 @@ describe('Codex notifier outbox', () => {
       targetBotAppId: ' ',
       event: completionEvent(),
     })).toThrow('codex_notifier_outbox_target_invalid');
+    expect(() => parseCodexNotifierOutboxItem({
+      schemaVersion: 1,
+      targetBotAppId: 'cli_target',
+      targetChatId: ' ',
+      event: completionEvent(),
+    })).toThrow('codex_notifier_outbox_chat_target_invalid');
+    expect(() => parseCodexNotifierOutboxItem({
+      schemaVersion: 1,
+      targetBotAppId: 'cli_target',
+      targetChatId: 'x'.repeat(257),
+      event: completionEvent(),
+    })).toThrow('codex_notifier_outbox_chat_target_invalid');
     expect(() => parseCodexNotifierOutboxItem({
       schemaVersion: 1,
       targetBotAppId: 'cli_target',

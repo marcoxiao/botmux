@@ -52,6 +52,8 @@ export interface CodexNotifierGlobalConfig {
   enabled?: boolean;
   /** 发送完成通知的 Bot App ID；启用时必须显式选择。 */
   targetBotAppId?: string;
+  /** 可选的群聊目标；缺省时通知发给 Bot 管理员私聊。 */
+  targetChatId?: string;
   /** 默认仅锁屏时发送飞书消息；always 表示每次任务完成都发送。 */
   notifyWhen?: CodexNotifierNotifyWhen;
 }
@@ -449,6 +451,13 @@ function readCodexNotifier(raw: unknown): CodexNotifierGlobalConfig | undefined 
   if (typeof value.targetBotAppId === 'string' && value.targetBotAppId.trim()) {
     out.targetBotAppId = value.targetBotAppId.trim();
   }
+  if (
+    typeof value.targetChatId === 'string'
+    && value.targetChatId.trim()
+    && value.targetChatId.length <= 256
+  ) {
+    out.targetChatId = value.targetChatId.trim();
+  }
   if (value.notifyWhen === 'locked_only' || value.notifyWhen === 'always') {
     out.notifyWhen = value.notifyWhen;
   }
@@ -748,6 +757,7 @@ export function writeCodexNotifierConfig(config: CodexNotifierGlobalConfig): Cod
     : {};
   delete existing.enabled;
   delete existing.targetBotAppId;
+  delete existing.targetChatId;
   delete existing.notifyWhen;
   mergeGlobalConfig({ codexNotifier: { ...existing, ...config } as CodexNotifierGlobalConfig });
   return readGlobalConfig().codexNotifier ?? {};
