@@ -112,6 +112,23 @@ describe('semantic progress reducer', () => {
     expect(state.timeline.at(-1)?.status).toBe('completed');
   });
 
+  it('owns fallback presentation for empty waiting and final confirmation semantics', () => {
+    let state = reduce(initialState(context), {
+      schemaVersion: 1, seq: 1, kind: 'waiting', text: '',
+    }, context);
+    expect(state.phase).toBe('waiting_input');
+    expect(state.currentText).toBeUndefined();
+
+    state = reduce(state, { schemaVersion: 1, seq: 2, kind: 'resumed' }, context);
+    state = reduce(state, { schemaVersion: 1, seq: 3, kind: 'finalizing' }, context);
+    expect(state).toMatchObject({ phase: 'running', currentText: '正在确认结果' });
+
+    const english = reduce(initialState({ ...context, locale: 'en' }), {
+      schemaVersion: 1, seq: 1, kind: 'finalizing',
+    }, { ...context, locale: 'en' });
+    expect(english.currentText).toBe('Confirming the result');
+  });
+
   it.each([
     ['completed', 'succeeded', 'completed'],
     ['failed', 'failed', 'failed'],

@@ -24,6 +24,7 @@ export type ProgressEvent =
   | { schemaVersion: 1; seq: number; kind: 'operation'; operation: ProgressOperation }
   | { schemaVersion: 1; seq: number; kind: 'waiting'; text: string }
   | { schemaVersion: 1; seq: number; kind: 'resumed' }
+  | { schemaVersion: 1; seq: number; kind: 'finalizing' }
   | { schemaVersion: 1; seq: number; kind: 'external_reply' }
   | {
       schemaVersion: 1;
@@ -193,7 +194,7 @@ export function reduce(
     return {
       ...next,
       phase: 'waiting_input',
-      currentText: event.text,
+      currentText: event.text || undefined,
       timeline: appended.timeline,
     };
   }
@@ -204,6 +205,13 @@ export function reduce(
       phase: 'running',
       currentText: undefined,
       timeline: finishCurrent(next.timeline),
+    };
+  }
+  if (event.kind === 'finalizing') {
+    return {
+      ...next,
+      phase: 'running',
+      currentText: context.locale === 'en' ? 'Confirming the result' : '正在确认结果',
     };
   }
   if (event.kind === 'external_reply') {
