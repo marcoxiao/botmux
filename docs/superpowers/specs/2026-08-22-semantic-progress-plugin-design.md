@@ -1,7 +1,7 @@
 # BotMux 语义进度卡插件设计
 
 日期：2026-08-22
-状态：已确认，等待书面审阅
+状态：最小插件 v2 已确认，进入实施计划
 
 ## 1. 背景与问题
 
@@ -14,7 +14,7 @@ BotMux 当前的 streaming card 本质上是远程终端控制卡：它围绕终
 
 两条运行链路已经具备足够事实来源：
 
-- Codex App Server 会产生 turn、command、file change、MCP、request user input 和 final 等结构化通知；
+- Codex App Server 会产生 turn、command、file change、MCP、request user input 和 final 等结构化通知；其中当前 Runner 会自动用空答案结束 `requestUserInput`，首版不把它扩展为新的双向提问协议；
 - TRAE 即使保持当前 tmux 模式、不启用实验性 RPC，其 rollout 也已实测包含 `task_started`、commentary、`exec_command_end`、`patch_apply_end`、`mcp_tool_call_end` 和 `task_complete`。
 
 问题不在于飞书缺少一个百分比控件，而在于 BotMux 没有把 CLI 事实转换成统一的语义进度。CardKit 只是交付载体，不能代替事件建模。
@@ -22,9 +22,9 @@ BotMux 当前的 streaming card 本质上是远程终端控制卡：它围绕终
 ## 2. 目标
 
 1. Codex App 与 TRAE 使用同一套 A 款“语义时间线”卡片。
-2. 每个用户 turn 只创建一张进度卡；该卡从执行中、等待输入一直演进到最终答复。
+2. 每个实际执行单元只创建一张进度卡；排队后独立执行的 turn 各有一张卡，被 Codex App ordered steer 合并的补充消息继续更新同一张卡。
 3. 完成时给原用户消息添加 `✅`，不额外发送“已完成”占位消息。
-4. 进度卡失败不能影响 CLI；最终答案必须可靠交付且不能重复。
+4. 进度卡失败不能影响 CLI；被插件接管的普通飞书 IM canonical final 必须可靠交付且不能重复。
 5. 定制逻辑放在独立 BotMux 插件中，核心只增加窄、通用、可上游化的扩展点。
 6. 组件与实现保持最小：优先复用现有插件、最终答复、reaction、去重和 latest-wins 机制，不建立第二套框架。
 
@@ -38,6 +38,9 @@ BotMux 当前的 streaming card 本质上是远程终端控制卡：它围绕终
 - 不让插件直接读取 BotMux App Secret，也不让插件绕开现有最终交付链路。
 - 不增加旧版飞书客户端兼容分支；CardKit 2.0 是该插件的明确运行要求。
 - 不新建独立 service、数据库、消息总线、通用 UI 框架或插件 SDK 包。
+- 不在首版实现 Codex App `requestUserInput` 的 Runner→Worker→飞书→Runner 双向桥；该能力作为独立二期任务设计。
+- 不接管 HTTP wait/async、文档评论、会议 receiver/listener、substitute turn 等特殊交付通道。
+- 不拦截显式 `botmux send` 并改写其既有消息；严格“一张卡原地收尾”只适用于 canonical `final_output` 的普通飞书 IM turn。
 
 ## 4. 已确认的产品体验
 
@@ -50,17 +53,19 @@ BotMux 当前的 streaming card 本质上是远程终端控制卡：它围绕终
 - 后续步骤只在有真实事件证据时出现；
 - 低层操作折叠为“执行细节 N 条”，不直接展开终端日志。
 
-普通进度按最新状态合并，最多每两秒更新一次。开始、等待输入、恢复、完成、失败和取消属于状态边界，立即更新。
+进度卡在执行单元真正开始时创建，而不是在消息刚进入队列时抢先创建。普通进度按最新状态合并，最多每两秒更新一次；开始、已有 TUI prompt 的等待/恢复、完成、失败和取消属于状态边界，立即更新。
 
 ### 4.2 等待输入
 
-原进度卡切换为“等待你的输入”。具体问题和选项继续复用 BotMux 现有 ask/TUI prompt 交互卡；用户回答后，原进度卡恢复执行中。这样不复制一套问答回调协议。
+当 Core 已经收到现有 `tui_prompt` 时，原进度卡切换为“等待你的输入”；具体问题和选项继续复用现有 TUI prompt 交互卡，`tui_prompt_resolved` 后原进度卡恢复执行中。
+
+TRAE 现有 TUI prompt 路径属于首版范围。Codex App 当前对 `item/tool/requestUserInput` 直接返回空答案，没有可复用的飞书交互闭环，因此首版不宣称支持该场景；以后若实现双向桥，只新增 Core 事实来源，不改插件 reducer 与卡片结构。
 
 ### 4.3 终态
 
-成功、失败或取消时，原卡切换为 BotMux 现有 canonical final card 内容。最终 Markdown、反馈按钮、usage/footer 和安全清理继续由 Core 的现有构建链负责，插件不复制 Markdown 渲染器。
+普通飞书 IM turn 成功时，原卡切换为 BotMux 现有 canonical final card 内容。最终 Markdown、反馈按钮、usage/footer 和安全清理继续由 Core 的现有构建链负责，插件不复制 Markdown 渲染器。失败或取消但没有 canonical final 时，插件只渲染对应终态摘要。
 
-原卡最终写入成功后，Core 给原用户消息添加 `✅`。卡片更新本身不被当作未读通知，因此 reaction 是无额外消息的完成提示。
+原卡最终写入成功后，Core 给该执行单元的 card-owning 用户消息添加 `✅`。卡片更新本身不被当作未读通知，因此 reaction 是无额外消息的完成提示。
 
 ## 5. 架构选择
 
@@ -72,20 +77,19 @@ BotMux 现有插件贡献类型只有 Skill、MCP、CLI、Dashboard 和独立 se
 
 ```text
 BotMux Core（薄 SPI）
-  ├── TurnProgressEvent v1
+  ├── TurnProgressFact v1（只新增缺失事实）
   ├── turn-progress 插件贡献点
-  ├── CardKit Host 能力
-  └── 少量 turn 接受 / progress / final 调用点
+  ├── 极小 CardKit adapter + delivery host
+  └── execution start / progress / final 短调用点
                 │
                 ▼
 botmux-plugin-semantic-progress（独立仓库）
-  ├── sources/
-  ├── state/
-  ├── components/
-  └── controller/
+  ├── reducer.ts
+  ├── card.ts
+  └── turn-progress/index.ts
 ```
 
-Core 只描述通用事实和交付能力，不包含 A 款布局、“AI马仔/马仔二号”名称或 Codex/TRAE 专属卡片分支。插件负责将通用事实投影为具体产品体验。
+Core 只描述通用事实和交付能力，不包含 A 款布局、“AI马仔/马仔二号”名称或 Codex/TRAE 专属卡片分支。Codex/TRAE 的 provider 事件只在各自现有 reader/runner 中归一化一次；插件只消费统一事件并投影为具体产品体验，不再设置第二层 source mapper。
 
 ### 5.2 仓库与提交边界
 
@@ -109,7 +113,7 @@ botmux plugin install ../botmux-plugin-semantic-progress --link
 
 实现时至少拆为两个独立提交边界：
 
-1. BotMux Core：只包含通用 turn-progress SPI、CardKit Host 与必要事件 tap，可单独评审并回馈上游；
+1. BotMux Core：只包含通用 turn-progress SPI、CardKit delivery host 与必要事件 tap，可单独评审并回馈上游；
 2. 独立插件：包含所有语义投影、卡片组件和产品策略，不进入 BotMux 上游源码树。
 
 插件通过现有按 Bot 绑定启用。AI马仔与马仔二号分别配置：
@@ -132,39 +136,43 @@ botmux plugin install ../botmux-plugin-semantic-progress --link
 turn-progress/index.js
 ```
 
-`PluginContributions` 增加单数 `turnProgress`。同一个 Bot 同时只能启用一个 turn-progress 贡献；出现多个时明确报配置冲突，不定义插件优先级或组合规则。该约束避免无意义的插件编排框架。
+`PluginContributions` 增加单数 `turnProgress`。
 
-插件入口为受信任的进程内模块。入口导出 `schemaVersion: 1` 的结构对象，Core 在激活时做运行时校验。插件不 import `src/` 私有模块；协议采用小型结构化对象，插件内部自行声明对应 TypeScript 类型，不额外创建 SDK 包。
+插件入口为受信任的进程内模块。入口导出 `schemaVersion: 1` 以及 `initialState`、`reduce`、`render` 三个函数，Core 在激活时做运行时校验。插件不 import `src/` 私有模块；协议采用小型结构化对象，插件内部自行声明对应 TypeScript 类型，不额外创建 SDK 包。
 
-### 6.2 TurnProgressEvent v1
+插件集合从现有 session plugin manifest 读取并冻结到当前 Worker generation，不能在同一执行单元中因 Dashboard 热切换而更换实现。同一个 Bot 同时只能启用一个 turn-progress 贡献；出现多个时明确报配置冲突，不定义插件优先级或组合规则。
 
-Worker 只向 Daemon 发送经过白名单化的事实：
+### 6.2 Worker 新增事实与插件事件
+
+Worker 新增的 IPC 只发送现有协议尚未表达的白名单事实：
 
 ```ts
-type TurnProgressEventV1 = {
+type TurnProgressFactV1 = {
   schemaVersion: 1;
-  id: string;
   seq: number;
   atMs: number;
-  kind:
-    | 'turn_started'
-    | 'narrative'
-    | 'operation_started'
-    | 'operation_completed'
-    | 'waiting_input'
-    | 'turn_terminal';
+  kind: 'turn_started' | 'narrative' | 'operation';
+  text?: string;
   operation?: {
     id?: string;
     type: 'command' | 'file_change' | 'mcp' | 'other';
-    label: string;
+    phase: 'started' | 'completed';
+    subjects?: string[];
     outcome?: 'succeeded' | 'failed' | 'cancelled';
   };
-  text?: string;
-  terminal?: 'succeeded' | 'failed' | 'cancelled' | 'ambiguous';
 };
 ```
 
-Daemon 在进入插件前补充并验证 session、turn、dispatch attempt、worker generation、CLI ID 和工作目录等权威上下文。插件不能通过事件 payload 改写路由身份。
+Daemon 在进入插件前补充并验证 session、turn、dispatch attempt、worker generation、CLI ID 和 locale 等权威上下文。插件不能通过事件 payload 改写路由身份。
+
+Core 交给插件的 `TurnProgressEventV1` 由 `TurnProgressFactV1` 与现有事件共同组成：
+
+- `turn_progress` IPC 提供 started、narrative、operation；
+- `tui_prompt` / `tui_prompt_resolved` 提供 waiting/resumed；
+- `turn_terminal` 提供 completed/failed/cancelled/ambiguous 终态；当本轮没有可交付的 `final_output` 时，它负责把卡片冻结为对应终态；
+- `final_output` 提供 canonical final delivery，不重新包装一份 terminal IPC。
+
+因此 Worker 不重复发送 waiting 或 terminal，插件协议也不要求 provider reader 复制已有生命周期。
 
 事件来源规则：
 
@@ -176,19 +184,16 @@ Daemon 在进入插件前补充并验证 session、turn、dispatch attempt、wor
 - MCP 只允许稳定的工具名，不传 invocation/result；
 - commentary 作为用户可见 narration，规范空白、移除控制字符、禁止原生 `<at>`，上限 240 个 Unicode 字符。
 
-### 6.3 CardKit Host
+### 6.3 极小 CardKit adapter 与 delivery host
 
-Core 新增一个集中模块承载 CardKit 通用能力：
+Lark client 只新增当前 SDK 已直接支持的两个薄适配器：
 
-- 创建 CardKit card entity；
-- 以 `card_id` 发送 interactive message；
-- 串行执行 element/batch update；
-- 维护单调 `sequence`；
-- 读取卡片用于不明确响应后的交付确认；
-- 添加 reaction；
-- 持久化最小 card binding。
+- `createCardEntity(cardJson) -> cardId`；
+- `updateCardEntity(cardId, cardJson, sequence, uuid)`。
 
-插件只提交“期望卡片模型”或稳定 element 更新，不接触 Lark SDK client、tenant token 或 App Secret。Host 负责 callback marker、安全校验、限流错误分类和消息撤回语义。
+以 `card_id` 发送 interactive reply 复用现有 `sessionReply` 路由和稳定 IM UUID；完成 reaction 复用现有 `addReaction`。首版不封装 element update、batch update、CardKit DSL 或不存在的 card-content read。
+
+Core 的 delivery host 只负责：单在途、latest pending snapshot、两秒普通节流、边界立即入队、单调 `sequence`、稳定 update UUID、callback marker 处理和最小 binding 持久化。插件只返回完整 CardKit 2.0 card JSON，不接触 Lark SDK client、tenant token、App Secret、计时器或磁盘。
 
 Card binding 只保存以下交付元数据，不保存推理或终端内容：
 
@@ -198,21 +203,25 @@ Card binding 只保存以下交付元数据，不保存推理或终端内容：
 - Lark message ID；
 - 最新成功 sequence；
 - delivery state；
-- 最新 card hash。
+- 当前 update intent 的稳定 UUID、sequence 和 card hash。
 
 持久化复用 BotMux 现有原子写、owner-only 权限和 session 生命周期设施，不在插件里复制一套 sidecar 安全库。
 
-现有 `V3ProgressCardManager` 保持不动：它绑定 Workflow journal、run sidecar、跨进程文件锁和整卡 PATCH，生命周期与普通聊天 turn 不同。这里复用它已经验证的“发送前意图、单在途、latest-wins、终态冻结”不变量，但不为表面复用把两套业务强行泛化成一个大 manager。CardKit Host 只实现当前需要的具体串行闭包。
+Binding 作为 Session 的一个可选字段保存，不新建 sidecar store。一个 session 同时只恢复一个实际执行单元的 active binding；完成后的卡片留在飞书，但清除本地 active binding。现有 `V3ProgressCardManager` 保持不动：这里只复用它验证过的不变量，不共享其 Workflow journal、run sidecar、文件锁或实现类。
 
 ### 6.4 Core 调用点
 
 现有大文件只允许出现短调用点，复杂逻辑进入新模块：
 
-1. turn 被接受后，询问已绑定 turn-progress 插件是否创建进度卡；
-2. Worker 的 `turn_progress` IPC 到达后，交给统一 host 校验并投递；
-3. ask/TUI prompt 开始和结束时发送 waiting/resumed 边界；
-4. `final_output` 构建 canonical final card 后，先请求插件在原卡完成交付；
-5. 插件返回已确认交付后，沿用现有 dedupe、feedback persistence、turn settlement 与 reaction；否则继续执行原有 fresh-message 最终链路。
+1. 实际执行单元的 `turn_started` 到达后，若资格判断通过，创建进度卡；
+2. Worker 的 `turn_progress` IPC 到达后，先做身份/序号校验，再调用插件纯 reducer/render；
+3. 现有 `tui_prompt` / `tui_prompt_resolved` 分支向同一 reducer 投递 waiting/resumed；
+4. 普通飞书 IM `final_output` 构建 canonical final card 后，请求 host 在原 card entity 完成交付；
+5. 明确成功后才沿用现有 dedupe、feedback persistence、turn settlement 与 `✅` reaction；明确永久失败才走现有 stable-UUID fresh-message 路径；
+6. `turn_terminal` 没有 canonical final 时，只把 active 卡冻结为完成、失败、取消或不明确终态；已有 `explicit_reply_observed` 时显示“答复已通过独立消息发送”，不改写显式消息；
+7. 被插件接管后不再创建或 patch 旧 streaming card；CardKit entity 创建明确失败时，本轮立即退回现有 `postTurnStartingCard`/最终答复链路，避免双卡或悬空卡。
+
+统一的基础资格判断必须同时用于 start、progress 和 final：插件已在当前 session manifest 启用、普通飞书 IM、非 HTTP wait/async、非 doc comment、非 VC receiver/listener、非 substitute、非 managed/silent turn。Final 接管还要求不是 `suppressDelivery` 或 `steer_superseded`；前者由 `explicit_reply_observed`/terminal 将进度卡安全收口，后者继续等待同一 ordered-steer 执行单元的真实 final。特殊通道完全沿用旧链路。
 
 不修改其他卡片 builder，不让插件分支散落到 `buildStreamingCard`。
 
@@ -220,43 +229,24 @@ Card binding 只保存以下交付元数据，不保存推理或终端内容：
 
 插件 ID 为 `semantic-progress`。它只有一个具体产品，不建设可继承组件基类、依赖注入容器或通用渲染框架。
 
-建议目录：
+首版目录固定为：
 
 ```text
 botmux-plugin-semantic-progress/
   package.json
-  turn-progress/
-    index.js
   src/
-    sources/
-      codex-app.ts
-      traex.ts
-    state/
-      reducer.ts
-      types.ts
-    components/
-      status-header.ts
-      semantic-timeline.ts
-      collapsed-details.ts
-      turn-actions.ts
-      usage-footer.ts
     card.ts
-    controller.ts
+    reducer.ts
+    turn-progress/
+      index.ts
   test/
+    card.test.ts
+    reducer.test.ts
 ```
 
-每个组件是一个小型纯函数：输入只读 view model，输出 CardKit 2.0 element。`card.ts` 组合这些函数。只有当一个组件确实存在独立规则和独立测试价值时才拆文件；一行映射留在调用处，不为对称而建空壳。
+构建产物为 `dist/turn-progress/index.js`，符合现有插件安装器只安装 `dist/` 的约束。`reducer.ts` 只实现纯状态转换，`card.ts` 内部使用小型纯函数组装 header、timeline、details 与 action。只有某个组件形成独立规则并需要独立测试时才拆文件；首版不创建 `sources/`、`components/`、`controller.ts` 或 `types.ts` 空壳。
 
-`controller.ts` 只负责：
-
-- 选择对应 source mapper；
-- 调用 reducer；
-- 合并两秒内的普通更新；
-- 在状态边界立即 render；
-- 把期望卡片交给 Host；
-- 终态后冻结并释放内存状态。
-
-不在 controller 中实现 Lark HTTP、文件持久化、最终答案格式化或 session 路由。
+插件入口只导出 `initialState`、`reduce` 和 `render`。两秒合并、CardKit sequence、持久化与 final 接管全部属于 Core delivery host，避免插件同时成为 UI 投影器和传输控制器。
 
 ## 8. 状态模型与数据流
 
@@ -270,7 +260,7 @@ starting → running ↔ waiting_input → succeeded
 
 规则：
 
-- Reducer 是纯函数；相同事件 ID 幂等；小于等于当前 seq 的旧事件丢弃；
+- Reducer 是纯函数；小于等于当前 seq 的旧事件丢弃，同一 provider sequence 天然幂等；
 - Core 在 reducer 前丢弃旧 worker generation、旧 turn 和错误 attempt；
 - operation 以稳定 ID 合并 started/completed；没有 started 的 completed 可以生成一条已完成事实，兼容 TRAE 当前主要提供 end 事件的情况；
 - 相邻同类操作折叠，时间线只保留四项，完整计数进入 details；
@@ -282,14 +272,15 @@ starting → running ↔ waiting_input → succeeded
 
 ```text
 Codex App notifications / TRAE rollout
-  → Worker 白名单事实
-  → TurnProgressEvent IPC
+  → 各自现有 reader/runner 一次性白名单归一化
+  → TurnProgressFact IPC
   → Core 权威身份校验
-  → semantic-progress source mapper
-  → pure reducer
-  → A 款组件树
-  → CardKit Host latest-wins update
+  → 现有 waiting/terminal 事件合流
+  → semantic-progress pure reducer + card render
+  → Core delivery host full-card latest-wins update
 ```
+
+Codex App ordered steer 不创建第二张卡：补充消息继续归属于当前实际执行单元。若消息排队后成为新的独立执行单元，则在其 `turn_started` 时创建下一张卡。
 
 ## 9. 最终交付与幂等
 
@@ -299,12 +290,14 @@ Codex App notifications / TRAE rollout
 
 1. Core 按现有逻辑构建 canonical final card；
 2. Core 将该卡和权威 turn 身份交给 turn-progress host；
-3. Host/插件尝试将原 card entity 更新为最终内容；
+3. Host 使用稳定 update UUID 与下一个 sequence 将原 card entity 全量更新为最终内容；
 4. 明确成功后返回现有 message ID；
 5. Core 才记录 feedback delivery、提交 Codex App settlement/bridge dedupe，并给原用户消息添加 `✅`；
-6. 若失败或无法确认，则 Core 使用现有稳定 UUID 的 fresh-message 路径交付最终答案。
+6. 若 CardKit 明确返回永久失败，则 Core 使用现有稳定 UUID 的 fresh-message 路径交付最终答案。
 
-遇到“服务端可能已接受、客户端未收到响应”时，Host 先通过 card read 校验 turn marker/card hash；只有确认未落地才允许 fresh-message fallback。这样同时满足“答案不能丢”和“答案不能重复”。
+初始交付分为 CardKit entity create 与现有 IM reply 两步：Core 在 reply 前先持久化 `cardId` 与稳定 IM UUID。Reply 结果不明确时只用同一 UUID 重试，不能重新 create entity；明确永久失败则放弃未挂载 entity 并回到现有开始卡/最终答复链路。这样即使网络在两步之间中断，也不会向用户发送两张进度卡。
+
+遇到“服务端可能已接受、客户端未收到响应”时，Host 不立即 fresh-message fallback，而是保留同一 update intent，并用相同 `uuid + sequence` 重试原卡。只有明确永久失败才切换交付介质；这是在 CardKit 没有 card-content read 的前提下同时避免丢失与重复的必要约束。进程内重试保留 canonical card JSON；Daemon 重启后不从 hash 反推内容，而是依赖现有 `final_output` settlement/transcript replay 重新构建同一 canonical card，并复用已持久化的 intent 身份。
 
 若 CardKit 进度卡从未创建成功，`final_output` 直接走现有路径。进度能力是可降级 UI，最终答复不是。
 
@@ -317,11 +310,11 @@ Codex App notifications / TRAE rollout
 - 普通进度两秒合并一次；
 - 状态边界绕过普通节流，但仍进入同一串行队列；
 - 中间进度更新失败只记录并等待下一次最新快照，不做无界重试；
-- 终态使用现有有限重试预算，失败后回到 fresh final。
+- 终态暂时错误或响应不明确时持续保留同一 durable intent，以封顶退避间隔重试，直到明确成功、明确永久失败或 turn 失去权威；不更换 UUID/sequence，也不并行双发；明确永久失败后才回到 fresh final。
 
 ### 10.2 权限与限流
 
-AI马仔和马仔二号分别需要 `cardkit:card:read` 与 `cardkit:card:write`。首次启用前做显式 preflight；权限不足时插件对该 Bot 标记不可用，并让 Core 继续现有卡片/最终答复链路，不把失败伪装成新卡片成功。
+AI马仔和马仔二号只需要本设计实际调用所要求的 `cardkit:card:write`；BotMux scope 清单已经包含它。首版不为了未调用的 card read 增加运行时依赖，也不再建设一套 preflight 框架；上线前通过现有权限检查确认应用已实际开通。首次 CardKit create 若明确返回权限错误，本轮直接沿用旧卡片/最终答复链路并记录可诊断错误。
 
 CardKit 的 429 和暂时性 5xx 归类为可重试传输错误；4xx schema、权限、card withdrawn 和身份不匹配归类为永久错误。最终交付根据第 9 节处理。
 
@@ -332,7 +325,7 @@ Core 从最小 binding 恢复 card ID、message ID、sequence 和 turn 身份：
 - TRAE 继续使用现有 rollout cursor/重放事实；
 - Codex App 无法重放的中间 UI 不持久化，恢复后先显示“已恢复执行”，再接新事件；
 - 终态 binding 永远不被恢复后的旧 progress 覆盖；
-- 无法证明 binding 权威时，不重建或覆盖旧卡，最终答复走可靠 fallback。
+- 无法证明 binding 权威时，不重建或覆盖旧卡；现有 final settlement/replay 重新进入资格判断并选择可靠交付路径。
 
 ## 11. 代码克制与卫生
 
@@ -342,7 +335,7 @@ Core 从最小 binding 恢复 card ID、message ID、sequence 和 turn 身份：
 2. 不因为“组件化”创建继承树、通用 DSL 或虚拟 DOM；组件只是纯函数。
 3. 不因一个调用写 wrapper；只有边界校验、复用或独立测试价值成立时才抽函数。
 4. Core 大文件只留短 tap，逻辑放新模块；不在 switch 中堆 Codex/TRAE/CardKit 分支。
-5. 复用 existing final card、reaction、dedupe、feedback、atomic persistence 和 latest-wins 语义。
+5. 复用 existing session plugin manifest、final card、reaction、dedupe、feedback、atomic persistence 和 IM UUID 语义。
 6. 输入校验、幂等、安全、错误分类和最终交付不能为了少行数被删除。
 7. 不加入“也许以后有用”的兼容层、feature matrix 或多插件组合协议。
 8. 实现完成后按设计逐项 Review；发现设计与实现不一致时先修正实现，不能在编码过程中静默改变范围。
@@ -353,29 +346,27 @@ Core 从最小 binding 恢复 card ID、message ID、sequence 和 turn 身份：
 
 ### 12.1 Core 单元测试
 
-- convention scanner 能发现、安装和 materialize `turn-progress/index.js`；
+- convention scanner 能发现并安装 `turn-progress/index.js`；session manifest 能冻结当前 generation 的贡献；
 - 同一 Bot 多个 turn-progress 贡献明确冲突；
 - 插件入口 schema、路径和导出校验 fail closed；
-- CardKit Host create/send/update/read/react 参数与权限错误分类；
-- 单在途、latest-wins、sequence、撤回和不明确响应确认；
+- CardKit adapter 的 create/update 参数、callback marker 与错误分类；
+- delivery host 的单在途、latest-wins、sequence、稳定 UUID、撤回和 durable ambiguous retry；
 - 旧 worker/turn/attempt 事件被丢弃；
-- final plugin delivery 成功时不新发消息，失败时沿用稳定 UUID fallback；
+- 统一资格判断覆盖普通 IM 与 HTTP/doc/VC/substitute/managed/suppressed/superseded 排除项；
+- final plugin delivery 成功时不新发消息，明确永久失败时沿用稳定 UUID fallback，响应不明确时不得双发；
 - final 成功后才加 `✅`，失败或未交付不误加。
 
 ### 12.2 插件单元测试
 
-- Codex App observation 到统一事件的映射；
-- TRAE `task_started`、commentary、command end、patch end、MCP end、task complete 映射；
-- raw reasoning、stdout、stderr、invocation/result 永不进入 view；
-- commentary、相对路径和工具名的清理与长度上限；
 - reducer 的幂等、乱序、无 started completed、waiting/resume、terminal freeze；
 - 四步时间线、折叠计数和各终态组件快照；
-- 两秒合并与边界立即刷新。
+- 插件入口只导出约定的三个纯函数，卡片内容不含 raw reasoning、stdout、stderr、invocation/result。
 
 ### 12.3 集成与回归
 
-- fake Codex App Server：一个 turn 只创建一张卡，并最终原卡收尾；
-- TRAE JSONL fixture：不启用 RPC 也能产生同构时间线并完成；
+- fake Codex App Server：一个实际执行单元只创建一张卡，ordered steer 复用同一张卡并最终原卡收尾；
+- TRAE JSONL fixture：同一次增量扫描产出 task started、commentary、command/patch/MCP facts 与 final，不启用 RPC；
+- Codex App `requestUserInput` 维持当前空答案行为，首版不伪造 waiting 支持；TRAE 现有 TUI prompt 能推进 waiting/resumed；
 - CardKit 429、5xx、权限错误、撤回、超时和响应不明确；
 - Daemon 重启后的 active/terminal binding 恢复；
 - 现有 `card-builder`、`traex-transcript`、Codex App runner、`final_output`、feedback 与 reaction 测试无回归；
@@ -388,13 +379,13 @@ Core 从最小 binding 恢复 card ID、message ID、sequence 和 turn 身份：
 1. 简短纯回答；
 2. 包含命令和文件修改的任务；
 3. MCP 调用；
-4. 等待用户输入并恢复；
+4. TRAE 等待用户输入并恢复；
 5. 用户停止；
 6. 执行失败；
 7. 长最终答复；
 8. Daemon 重启后继续。
 
-每例确认：只有一张进度卡、步骤语义正确、无敏感内部输出、终态原卡正确、原消息有 `✅`、失败时答案不丢不重。
+普通 IM 每例确认：每个实际执行单元只有一张进度卡、步骤语义正确、无敏感内部输出、终态原卡正确、原消息有 `✅`、失败时答案不丢不重。另行验证 HTTP、文档评论、会议和显式 `botmux send` 仍走原路径且无回归。
 
 ## 13. 上线与回滚
 
@@ -413,7 +404,7 @@ Core 从最小 binding 恢复 card ID、message ID、sequence 和 turn 身份：
 - Core 只有通用、最小、可独立提交的扩展；
 - 所有产品定制位于独立插件；
 - 两个 Bot 均通过自动测试与真实飞书验收；
-- 最终答案在所有故障分支中不丢失、不重复；
+- 普通飞书 IM canonical final 在明确失败与模糊提交分支中不丢失、不重复；特殊交付通道保持现状；
 - 未启用插件的 Bot 行为零变化；
 - 代码 Review 未发现绕过现有正确性链路、重复基础设施或无必要抽象；
 - 设计、实现、测试和部署配置一致。
