@@ -15,6 +15,11 @@ export function codexNotifierMessageUuid(eventId: string): string {
   return `cw_${createHash('sha256').update(eventId).digest('hex').slice(0, 47)}`;
 }
 
+/** 降级私聊与原群消息使用不同幂等键，避免飞书跨接收方误判为同一次发送。 */
+export function codexNotifierFallbackMessageUuid(eventId: string): string {
+  return `cwf_${createHash('sha256').update(eventId).digest('hex').slice(0, 46)}`;
+}
+
 export type CodexNotifierEventValidationCode =
   | 'invalid_plugin'
   | 'payload_too_large'

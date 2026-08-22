@@ -3,6 +3,7 @@ export {
   MAX_CODEX_NOTIFIER_EVENT_BYTES,
   CodexNotifierEventValidationError,
   codexNotifierEventId,
+  codexNotifierFallbackMessageUuid,
   codexNotifierMessageUuid,
   createCodexNotifierCompletionEvent,
   createCodexNotifierEvent,
@@ -26,8 +27,14 @@ export type {
 } from './event-store.js';
 export {
   buildCodexCompletionCard,
+  buildCodexNotifierDeliveryFailureCard,
   buildCodexNotifierResultCard,
 } from './card.js';
+export {
+  CodexNotifierDeliveryCoordinator,
+  type CodexNotifierDeliveryCoordinatorOptions,
+  type CodexNotifierDeliveryResult,
+} from './delivery.js';
 export {
   createCodexNotifierCardActionHandler,
   type CodexNotifierCardActionDeps,

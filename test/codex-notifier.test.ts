@@ -6,8 +6,10 @@ import {
   CodexNotifierEventStore,
   CodexNotifierEventValidationError,
   buildCodexCompletionCard,
+  buildCodexNotifierDeliveryFailureCard,
   buildCodexNotifierResultCard,
   codexNotifierEventId,
+  codexNotifierFallbackMessageUuid,
   codexNotifierMessageUuid,
   parseCodexNotifierEvent,
   parseCodexNotifierPluginEvent,
@@ -123,6 +125,15 @@ describe('codexNotifierMessageUuid', () => {
     expect(first).toMatch(/^cw_[a-f0-9]{47}$/);
     expect(second).not.toBe(first);
     expect(codexNotifierMessageUuid(`${prefix}-first`)).toBe(first);
+  });
+
+  it('derives a separate stable UUID for fallback DMs', () => {
+    const eventId = validEvent().eventId;
+    expect(codexNotifierFallbackMessageUuid(eventId)).toMatch(/^cwf_[a-f0-9]{46}$/);
+    expect(codexNotifierFallbackMessageUuid(eventId)).toBe(
+      codexNotifierFallbackMessageUuid(eventId),
+    );
+    expect(codexNotifierFallbackMessageUuid(eventId)).not.toBe(codexNotifierMessageUuid(eventId));
   });
 });
 
@@ -443,6 +454,17 @@ describe('buildCodexCompletionCard', () => {
     expect(body.content).toBe('第一行 \n第二行');
     expect(serialized).not.toContain('\u0000');
     expect(serialized).not.toContain('<at id=all>');
+  });
+});
+
+describe('buildCodexNotifierDeliveryFailureCard', () => {
+  it('keeps the completion result but never exposes continuation actions', () => {
+    const serialized = buildCodexNotifierDeliveryFailureCard(validEvent());
+    expect(serialized).toContain('目标群话题投递失败');
+    expect(serialized).toContain('任务已经完成。');
+    expect(serialized).not.toContain('codex_notifier_continue');
+    expect(serialized).not.toContain('codex_notifier_open_app');
+    expect(serialized).not.toContain(APP_THREAD_ID);
   });
 });
 

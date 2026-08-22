@@ -144,6 +144,52 @@ export function buildCodexCompletionCard(
   });
 }
 
+/** 群话题投递失败后的管理员私聊；保留结果，但故意不提供任何接管动作。 */
+export function buildCodexNotifierDeliveryFailureCard(
+  event: CodexTaskCompletedEvent,
+): string {
+  const project = safeSingleLine(event.cwd.split(/[\\/]/).filter(Boolean).pop() ?? 'Codex App', 80);
+  const title = safeSingleLine(event.title ?? '', 180);
+  const conversationTitle = title && title !== project ? `${project} · ${title}` : title || project;
+  const finalPreview = safeMultiline(event.finalPreview ?? '', 6500);
+  const elements: Array<Record<string, unknown>> = [
+    {
+      tag: 'markdown',
+      content: '⚠️ **目标群话题投递失败**，本次结果已改发到管理员私聊。请检查工作台；后续通知会继续使用有效路由，路由已失效时会重新建立话题。',
+    },
+    {
+      tag: 'markdown',
+      content: `💬 **会话名**: ${escapeMarkdownText(conversationTitle)}`,
+    },
+  ];
+  if (finalPreview) {
+    elements.push(
+      { tag: 'hr' },
+      { tag: 'markdown', content: '📝 **AI 回复**' },
+      {
+        tag: 'div',
+        element_id: 'main_content',
+        text: { tag: 'plain_text', content: finalPreview, lines: 30 },
+      },
+    );
+  }
+  elements.push({
+    tag: 'markdown',
+    text_size: 'notation',
+    content: '此卡仅用于告警和查看结果，不能从私聊接管群话题。',
+  });
+
+  return JSON.stringify({
+    schema: '2.0',
+    config: { update_multi: true },
+    header: {
+      template: 'orange',
+      title: { tag: 'plain_text', content: '⚠️ Codex 通知降级到私聊' },
+    },
+    body: { direction: 'vertical', elements },
+  });
+}
+
 /**
  * 构建回调完成后的 V2 结果卡，确保可安全替换原始完成通知卡。
  */
