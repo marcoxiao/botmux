@@ -8,7 +8,7 @@
 - 起始 commit：`9684a1aa5971f1fd3655e790c5a38716480dfc3a`
 - Node：`v22.22.0`
 - pnpm：`9.5.0`
-- Codex：`codex-cli 0.142.3`
+- Codex：由 `codex-cli 0.142.3` 升级到 `0.149.0`
 - tmux：基线缺失；通过临时 TUNA API/bottle 环境安装 Homebrew `tmux 3.7c`，未修改全局 Homebrew 镜像配置；独立 socket 的 new-session/kill-server 功能探测通过。
 
 ## 旧通道基线
@@ -36,6 +36,7 @@
 - `cli-runtime-update` 的 5 个初始失败来自 macOS `/var` 与 `/private/var` 路径别名；规范化 `TMPDIR` 后 43/43 通过，产品代码无需修改。
 - 最小权限模式聚焦测试：`test/api-only-mode-wiring.test.ts` 45/45 通过；完整构建通过。
 - BotMux daemon 与 Dashboard 已启动，均仅监听回环地址；`/healthz` 返回 200。
+- `0.142.3` 对 `gpt-5.6-sol` 的请求被后端明确拒绝（要求升级 Codex），BotMux 旧 App Server 将其显示为流断开；升级到 `0.149.0` 后同模型最小请求成功返回 `OK`。
 
 ## 最小权限策略
 
@@ -53,6 +54,7 @@
 ## 飞书真机验收
 
 - 自动项：WSClient ready、daemon online、Dashboard online、健康检查 200、撤回权限重启后未回弹。
-- 待人工项：私聊发送一条消息；在既有白名单群中人工 `@AI马仔` 发送一条消息。
+- 群内人工 `@AI马仔` 已验证事件接收、话题映射与会话创建；旧 runner 已挂起，下一条消息将以 `0.149.0` 冷启动并恢复原 Codex 上下文。
+- 待人工项：在原话题再发送一条消息，确认升级后的完整回复；私聊再发送一条消息。
 
 ## 清理与保留项
