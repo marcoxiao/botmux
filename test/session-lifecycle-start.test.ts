@@ -231,6 +231,17 @@ beforeEach(() => {
   });
 });
 
+it('fail-closes worker spawn for a native Desktop follower session', () => {
+  const ds = makeDs();
+  ds.session.cliId = 'codex-app';
+  ds.session.cliSessionId = '01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35';
+  ds.session.codexAppTransport = 'desktop-ipc';
+
+  expect(() => forkWorker(ds, 'must use Desktop follower IPC', false))
+    .toThrow('Codex Desktop follower session cannot spawn a worker');
+  expect(forkMock).not.toHaveBeenCalled();
+});
+
 describe('ordinary IM worker receipt acknowledgement', () => {
   it('clears the watchdog when the exact live worker generation receives the turn', async () => {
     vi.useFakeTimers();
@@ -2735,6 +2746,48 @@ describe('session.start lifecycle integration', () => {
       nativeSessionTitle: '[BotMux·Lark] 排查这个 TTP logid',
       nativeSessionTitlePrompt: '排查这个 TTP logid 的失败原因',
     }));
+  });
+
+  it('builds and passes the Lark topic title to a fresh Codex App worker', () => {
+    vi.mocked(getBot).mockReturnValue(defaultBot({ cliId: 'codex-app' }));
+    const ds = makeDs({
+      session: {
+        ...makeDs().session,
+        cliId: 'codex-app',
+        title: '@TestBot 测试修复',
+      },
+    });
+    forkWorker(ds, '<user_message>@TestBot 测试修复</user_message>', false);
+    const worker = forkMock.mock.results.at(-1)!.value;
+    const init = vi.mocked(worker.send).mock.calls[0][0];
+
+    expect(init).toEqual(expect.objectContaining({
+      type: 'init',
+      nativeSessionTitle: '[BotMux·Lark] 测试修复',
+    }));
+    expect(init).not.toHaveProperty('nativeSessionTitlePrompt');
+    expect(ds.session.nativeSessionTitleAwaitingContent).toBeUndefined();
+  });
+
+  it('does not arm the deferred semantic-title state for a mention-only Codex App topic', () => {
+    vi.mocked(getBot).mockReturnValue(defaultBot({ cliId: 'codex-app' }));
+    const ds = makeDs({
+      session: {
+        ...makeDs().session,
+        cliId: 'codex-app',
+        title: '@@TestBot',
+        chatDisplayName: 'BotMux 标题优化群',
+      },
+    });
+    forkWorker(ds, '<user_message>@@TestBot</user_message>', false);
+    const worker = forkMock.mock.results.at(-1)!.value;
+    const init = vi.mocked(worker.send).mock.calls[0][0];
+
+    expect(init).toEqual(expect.objectContaining({
+      nativeSessionTitle: '[BotMux·Lark] BotMux 标题优化群',
+    }));
+    expect(init).not.toHaveProperty('nativeSessionTitlePrompt');
+    expect(ds.session.nativeSessionTitleAwaitingContent).toBeUndefined();
   });
 
   it('waits when a fresh Codex topic only contains the bot mention', () => {

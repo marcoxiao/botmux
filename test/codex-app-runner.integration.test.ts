@@ -691,6 +691,112 @@ describe('codex-app-runner app-server protocol integration', { timeout: 120_000,
     }
   });
 
+  it('sets the supplied semantic thread name only after the first user turn is accepted', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-runner-title-'));
+    const fakeCodex = join(dir, 'fake-codex');
+    const logPath = join(dir, 'requests.jsonl');
+    copyFileSync(FAKE_SERVER_FIXTURE, fakeCodex);
+    chmodSync(fakeCodex, 0o755);
+    const control = new ControlCollector(dir);
+    await control.listen();
+    const harness = startRunner(fakeCodex, dir, logPath, '0.149.0', 'success', control.bootstrap.path, {
+      extraArgs: ['--thread-name', '[BotMux·Lark] 测试修复'],
+    });
+    try {
+      await waitFor(harness, () => harness.stdout.includes('Codex App connected.'));
+      expect(readRequests(logPath).some(request => request.method === 'thread/name/set')).toBe(false);
+
+      harness.child.stdin.write(`${CONTROL_PREFIX}${encodeRunnerInput('测试修复')}\r`);
+      await waitFor(harness, () => readRequests(logPath).some(request => request.method === 'thread/name/set'));
+
+      const requests = readRequests(logPath);
+      const turnStartIndex = requests.findIndex(request => request.method === 'turn/start');
+      const nameSetIndex = requests.findIndex(request => request.method === 'thread/name/set');
+      expect(turnStartIndex).toBeGreaterThan(-1);
+      expect(nameSetIndex).toBeGreaterThan(turnStartIndex);
+      expect(requests[nameSetIndex]?.params).toMatchObject({
+        threadId: 'thread-fake',
+        name: '[BotMux·Lark] 测试修复',
+      });
+    } finally {
+      await stopChild(harness.child);
+      await control.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('interrupts an active turn and unsubscribes its thread when the PTY closes with SIGHUP', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-runner-close-'));
+    const fakeCodex = join(dir, 'fake-codex');
+    const logPath = join(dir, 'requests.jsonl');
+    copyFileSync(FAKE_SERVER_FIXTURE, fakeCodex);
+    chmodSync(fakeCodex, 0o755);
+    const control = new ControlCollector(dir);
+    await control.listen();
+    const harness = startRunner(
+      fakeCodex,
+      dir,
+      logPath,
+      '0.149.0',
+      'hang-turn-completion',
+      control.bootstrap.path,
+    );
+    try {
+      await waitFor(harness, () => harness.stdout.includes('Codex App connected.'));
+      harness.child.stdin.write(`${CONTROL_PREFIX}${encodeRunnerInput('未完成任务')}\r`);
+      await waitFor(harness, () => readRequests(logPath).some(request => request.method === 'turn/start'));
+
+      const exited = new Promise<void>(resolvePromise => harness.child.once('exit', () => resolvePromise()));
+      harness.child.kill('SIGHUP');
+      await exited;
+
+      const methods = readRequests(logPath).map(request => request.method);
+      expect(methods).toContain('turn/interrupt');
+      expect(methods).toContain('thread/unsubscribe');
+      expect(methods.indexOf('turn/interrupt')).toBeLessThan(methods.indexOf('thread/unsubscribe'));
+    } finally {
+      await stopChild(harness.child);
+      await control.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the same cleanup path when the terminal sends Ctrl-C', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-runner-ctrl-c-'));
+    const fakeCodex = join(dir, 'fake-codex');
+    const logPath = join(dir, 'requests.jsonl');
+    copyFileSync(FAKE_SERVER_FIXTURE, fakeCodex);
+    chmodSync(fakeCodex, 0o755);
+    const control = new ControlCollector(dir);
+    await control.listen();
+    const harness = startRunner(
+      fakeCodex,
+      dir,
+      logPath,
+      '0.149.0',
+      'hang-turn-completion',
+      control.bootstrap.path,
+    );
+    try {
+      await waitFor(harness, () => harness.stdout.includes('Codex App connected.'));
+      harness.child.stdin.write(`${CONTROL_PREFIX}${encodeRunnerInput('未完成任务')}\r`);
+      await waitFor(harness, () => readRequests(logPath).some(request => request.method === 'turn/start'));
+
+      const exited = new Promise<void>(resolvePromise => harness.child.once('exit', () => resolvePromise()));
+      harness.child.stdin.write(`\u0003${CONTROL_PREFIX}${encodeRunnerInput('关闭后不应执行')}\r`);
+      await exited;
+
+      const methods = readRequests(logPath).map(request => request.method);
+      expect(methods).toContain('turn/interrupt');
+      expect(methods).toContain('thread/unsubscribe');
+      expect(methods).not.toContain('turn/steer');
+    } finally {
+      await stopChild(harness.child);
+      await control.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps retrying when the worker socket begins listening after the runner starts', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-runner-late-socket-'));
     const fakeCodex = join(dir, 'fake-codex');

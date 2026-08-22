@@ -44,6 +44,7 @@ import { repinSessionWorkingDir } from './session-cwd.js';
 import { validateAdoptTarget, adoptTargetKey, adoptTargetLabel, type AdoptableSession } from './session-discovery.js';
 import { validateZellijAdoptTarget, type ZellijAdoptableSession } from './zellij-adopt-discovery.js';
 import { listCodexAppThreads, type CodexAppThreadSummary } from '../services/codex-app-threads.js';
+import { probeCodexDesktopThread } from '../features/codex-notifier/desktop-ipc-client.js';
 import { generateAuthUrl, getTokenStatus, resolveUserToken, DOC_COMMENT_OAUTH_SCOPES, FEED_GROUP_OAUTH_SCOPES } from '../utils/user-token.js';
 import { DocSubscriptionPermissionError, listDocComments, resolveDocFile, subscribeDocFile, unsubscribeDocFile } from '../im/lark/doc-comment.js';
 import { parseDocWatchCommand } from './doc-watch-command.js';
@@ -4354,6 +4355,12 @@ export async function startCodexAppThreadSession(
   if (await blockRiffTakeover(ds, sessionReply)) return;
   if (await blockTakeoverWhilePendingRepo(ds, sessionReply)) return;
 
+  // A Codex Desktop thread already has one authoritative writer. Prove the
+  // Desktop still owns this exact thread before changing any BotMux state;
+  // spawning another app-server here fails with `active writer` and previously
+  // produced a false green takeover card before that asynchronous failure.
+  await probeCodexDesktopThread(thread.threadId);
+
   const targetSessionId = ds.session.sessionId;
   const switched = await withBotTurnMutation(ds.larkAppId, async () => {
     const current = [...deps.activeSessions.values()].find(
@@ -4364,6 +4371,10 @@ export async function startCodexAppThreadSession(
     if (hasProtectedSessionMutationOwnership(current)) {
       return { status: 'pending' as const, anchor: sessionAnchorId(current) };
     }
+    // Retire any ordinary BotMux worker before changing the durable transport.
+    // The native Desktop remains the only Codex writer; this session owns no
+    // replacement worker and all future turns route through follower IPC.
+    killWorker(current);
     current.adoptedFrom = undefined;
     current.workingDir = thread.cwd;
     current.hasHistory = true;
@@ -4374,6 +4385,12 @@ export async function startCodexAppThreadSession(
     current.session.title = `Codex App: ${title}`;
     current.session.cliId = 'codex-app';
     current.session.cliSessionId = thread.threadId;
+    current.session.codexAppTransport = 'desktop-ipc';
+    current.session.cliPathOverride = undefined;
+    current.session.wrapperCli = undefined;
+    current.session.model = undefined;
+    current.session.agentFrozen = true;
+    current.spawnModelOverride = undefined;
     current.session.adoptedFrom = undefined;
     // 接管已有原生 thread 时，标题所有权属于 Codex App。旧的 BotMux 托管标题
     // 若继续进入 resume init，会反向覆盖用户在 App 中看到的原生标题。
@@ -4381,7 +4398,6 @@ export async function startCodexAppThreadSession(
     current.session.nativeSessionTitleUserDefined = undefined;
     current.session.nativeSessionTitleAwaitingContent = undefined;
     sessionStore.updateSession(current.session);
-    forkWorker(current, '', true);
     return { status: 'switched' as const, anchor: sessionAnchorId(current) };
   });
   if (switched.status === 'gone') {

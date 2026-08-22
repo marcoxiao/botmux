@@ -536,6 +536,9 @@ export interface Session {
   whiteboardId?: string;
   /** CLI-native resume id when it differs from botmux's sessionId (for example Codex thread id). */
   cliSessionId?: string;
+  /** Native Codex Desktop owns the thread; BotMux submits turns through the
+   * Desktop follower IPC instead of spawning a competing app-server writer. */
+  codexAppTransport?: 'desktop-ipc';
   /** Provenance: the botmux sessionId this session was forked from (`/fork`).
    *  Purely informational — surfaced in UI/pickers so a fork is distinguishable
    *  from its parent. Does not affect routing or lifecycle. */

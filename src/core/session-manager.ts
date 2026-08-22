@@ -2551,6 +2551,10 @@ export async function restoreActiveSessions(
     // registration Promise yielded. Its backing pane can still be starting, so
     // a missing probe is not zombie evidence and restore must leave it alone.
     if (!stillOwnsRestoreRegistration(ds) || ds.worker) continue;
+    // Native Desktop owns the only writer for this thread. A restored follower
+    // binding remains worker-less and reconnects per turn through Desktop IPC;
+    // it must never enter persistent-backend or durable-ledger auto-refork.
+    if (ds.session.codexAppTransport === 'desktop-ipc') continue;
     // External /adopt sessions use their discovered source target rather than
     // Botmux's deterministic managed backing name. They were already restored
     // through the adopt path above and must not enter the managed probe batch.

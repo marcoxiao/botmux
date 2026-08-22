@@ -401,6 +401,11 @@ import {
   startCodexNotifierAdoptionSession,
   type CodexTaskCompletedEvent,
 } from './features/codex-notifier/index.js';
+import {
+  CodexDesktopUnavailableError,
+  probeCodexDesktopThread,
+  sendCodexDesktopThreadTurn,
+} from './features/codex-notifier/desktop-ipc-client.js';
 
 /** This daemon process's bot larkAppId (set in startDaemon).  Used to scope v3
  *  humanGate cold-attach + start to runs this bot owns (codex blocker #1). */
@@ -5113,6 +5118,23 @@ async function adoptCodexNotifierEvent(
   const activeKey = sessionKey(anchor, larkAppId);
   let ds = activeSessions.get(activeKey);
 
+  // Prove that Codex Desktop currently owns this exact native thread before
+  // creating or rewriting any BotMux state. A failed/offline takeover must be
+  // a clean retry: no orphan session, no cleared buffered input, no green card.
+  if (ds && isSessionTransferring(ds)) {
+    throw new Error('该会话正在转移，暂时无法接管；请转移完成后在完成通知卡上重试');
+  }
+  const probedSessionId = ds?.session.sessionId;
+  await probeCodexDesktopThread(event.threadId);
+  signal.throwIfAborted();
+  if (
+    ds
+    && probedSessionId
+    && notifierAdoptStaleOrTransferring(ds, activeSessions, activeKey, probedSessionId)
+  ) {
+    throw new Error('该会话正在转移或已变更，无法接管；请稍后在完成通知卡上重试');
+  }
+
   if (!ds) {
     const fallbackTitle = event.cwd.split(/[\\/]/).filter(Boolean).pop() ?? 'Codex App';
     const title = (event.title || `Codex App: ${fallbackTitle}`).slice(0, 50);
@@ -5149,23 +5171,15 @@ async function adoptCodexNotifierEvent(
     }
   }
 
-  // Transfer guard OUTSIDE the launch branch. If the session is already on the
-  // target thread with a live worker, the branch below is skipped entirely —
-  // but a concurrent /relay could still be moving this session's routing away.
-  // Returning a green「已接管，可继续」while the route is migrating is a lie.
-  // Fail-closed here first (a freshly-created ds has no transfer gate, so this
-  // is a no-op for the new-session path); the launch branch keeps its own
-  // post-await revalidation for the drift that can open during its awaits.
-  if (isSessionTransferring(ds)) {
-    throw new Error('该会话正在转移，暂时无法接管；请转移完成后在完成通知卡上重试');
-  }
-
   let bufferedInputDropped = false;
   // Snapshot the session identity BEFORE the throwable/deadline-bound awaits
   // below. If the session is closed, swapped, or re-created under this active
   // key while we await, the post-await revalidation must detect the drift.
   const adoptGenSessionId = ds.session.sessionId;
-  if (ds.session.cliSessionId !== event.threadId || !ds.worker || ds.worker.killed) {
+  if (
+    ds.session.cliSessionId !== event.threadId
+    || ds.session.codexAppTransport !== 'desktop-ipc'
+  ) {
     // Do the two throwable, deadline-sensitive steps FIRST, before mutating any
     // session/pending state: the dynamic import and the 2.2s AbortSignal check.
     // If either fails here nothing has been touched, so no rollback is needed
@@ -5180,21 +5194,6 @@ async function adoptCodexNotifierEvent(
     if (notifierAdoptStaleOrTransferring(ds, activeSessions, activeKey, adoptGenSessionId)) {
       throw new Error('该会话正在转移或已变更，无法接管；请稍后在完成通知卡上重试');
     }
-
-    // 接管原生 Codex App 线程时固定为纯 codex-app 启动，不能继承通知 Bot 的
-    // wrapper/model；这些配置针对普通 CLI，会错误包装 app-server runner。
-    // model 由 resolveSessionLaunchModel 在每次 spawn 时解析：这里把 cliId 钉成
-    // codex-app 后，若通知 Bot 自己不是 codex-app，session 与 bot 的 cliId 不匹配
-    // → 不会拿 bot 那个面向别的 CLI 的 model；清掉历史记录值让兜底也为空。
-    // spawnModelOverride（trigger 的一次性 model）优先级最高且无条件，必须一并清掉，
-    // 否则它会泄漏进接管后的 codex-app 启动。
-    ds.session.cliId = 'codex-app';
-    ds.session.cliPathOverride = botCfg.cliPathOverride;
-    delete ds.session.wrapperCli;
-    delete ds.session.model;
-    ds.spawnModelOverride = undefined;
-    ds.session.agentFrozen = true;
-    sessionStore.updateSession(ds.session);
 
     // 默认 flat DM(p2pMode=chat)下这条按钮回调复用同一私聊的现有会话。若该会话
     // 恰好停在「待选仓库」挂起态且已缓冲一条尚未提交的输入，接管会消费掉
@@ -5255,10 +5254,10 @@ async function adoptCodexNotifierEvent(
   }
 
   const baseAdoptNotice = scope === 'chat'
-    ? '现在可以直接在当前私聊继续发送指令；需要操作终端时，请点击会话卡内的「获取操作链接」。'
-    : '请在本卡片的话题中继续发送指令；需要操作终端时，请点击话题会话卡内的「获取操作链接」。';
+    ? '现在可以直接在当前私聊继续发送指令，消息会进入同一个 Codex App 任务；电脑或 Codex App 离线时会明确提示，不会排队。'
+    : '请在本卡片的话题中继续发送指令，消息会进入同一个 Codex App 任务；电脑或 Codex App 离线时会明确提示，不会排队。';
   return buildCodexNotifierResultCard(
-    '已接管 Codex App 任务',
+    '已连接 Codex App 任务',
     bufferedInputDropped
       ? `⚠️ 你此前发送但尚未送达的消息未随本次接管发送，请重新发送一次。\n\n${baseAdoptNotice}`
       : baseAdoptNotice,
@@ -19242,6 +19241,7 @@ async function handleThreadReplyAdmitted(
   const tryAcquireInitialStartClaim = (): void => {
     if (initialStartClaimToken
       || !ds
+      || ds.session.codexAppTransport === 'desktop-ipc'
       || (ds.worker && !ds.worker.killed)
       || ds.pendingRepo
       || ds.initialStartPending === true) return;
@@ -19873,6 +19873,73 @@ async function handleThreadReplyAdmitted(
 
   // codexAppSteerable was computed ONCE above (R5-B1-1), before every admission /
   // fork branch; reuse that frozen value for the live-worker / worker-null split.
+
+  // A native Codex Desktop task is already owned by the Desktop process. Route
+  // the turn through its follower IPC; never fall through to worker-null refork,
+  // which would launch a competing app-server writer for the same thread.
+  if (ds.session.codexAppTransport === 'desktop-ipc') {
+    const threadId = ds.session.cliSessionId;
+    const turnSender = await getThreadSender();
+    const botCfg = getBot(ds.larkAppId).config;
+    const cliInput = buildFollowUpCliInput(promptContent, ds.session.sessionId, {
+      attachments,
+      mentions: parsed.mentions,
+      isAdoptMode: false,
+      cliId: 'codex-app',
+      cliPathOverride: ds.session.cliPathOverride ?? botCfg.cliPathOverride,
+      sender: turnSender,
+      larkAppId,
+      chatId: ds.session.chatId,
+      whiteboardId: ds.session.whiteboardId,
+      substituteTrigger,
+      codexAppText: parsed.content,
+      codexAppApplicationContext,
+      codexAppMessageContext,
+      sessionBackendType: ds.session.backendType,
+      turnId: parsed.messageId,
+    });
+    const nativeInput = cliInput.codexAppInput ?? { text: parsed.content };
+    if (!threadId) {
+      await sessionReply(
+        anchor,
+        'Codex App 连接信息已失效，本条消息没有排队；请从新的完成通知卡重新连接后再发送。',
+        'text',
+        larkAppId,
+      );
+      markIngressAdmitted(ctx);
+      return;
+    }
+    try {
+      await sendCodexDesktopThreadTurn({
+        threadId,
+        turnId: parsed.messageId,
+        input: nativeInput,
+      });
+      // The Desktop owner accepted the turn. Only now acknowledge ingress and
+      // persist retry metadata; a failed follower request must never look queued.
+      markIngressAdmitted(ctx);
+      rememberLastCliInput(ds, promptContent, cliInput);
+      await noteTurnReceived(
+        ds,
+        parsed.messageId,
+        parsed.content,
+        turnSender,
+        parsed.messageId,
+        substituteTrigger ? SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE : undefined,
+      );
+    } catch (error) {
+      const message = error instanceof CodexDesktopUnavailableError
+        ? 'Codex App 当前离线，或该任务未在 App 中打开。本条消息没有排队，请打开原任务后重新发送。'
+        : '发送到 Codex App 失败，本条消息没有排队，请稍后重新发送。';
+      await sessionReply(anchor, message, 'text', larkAppId);
+      markIngressAdmitted(ctx);
+      logger.warn(
+        `[${tag(ds)}] Desktop follower rejected ${parsed.messageId}: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return;
+  }
 
   // Send message to worker via IPC
   if (ds.worker && !ds.worker.killed) {

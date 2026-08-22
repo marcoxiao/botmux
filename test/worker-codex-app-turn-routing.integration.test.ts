@@ -322,6 +322,7 @@ describe('Codex App worker queued-turn attribution', () => {
       cliId: 'codex-app',
       cliPathOverride: fakeCodex,
       backendType: 'pty',
+      nativeSessionTitle: '[BotMux·Lark] 转发原生标题',
       prompt: '<user_message>turn one legacy</user_message>',
       promptCodexAppInput: {
         text: 'turn one',
@@ -381,6 +382,13 @@ describe('Codex App worker queued-turn attribution', () => {
       expect(secondWrite).toBeGreaterThan(-1);
       expect(firstFinalMap).toBeGreaterThan(secondWrite);
       expect(joinedLogs).not.toContain('rejected final marker');
+      expect(readRequests(requestLog)).toContainEqual(expect.objectContaining({
+        method: 'thread/name/set',
+        params: {
+          threadId: 'thread-fake',
+          name: '[BotMux·Lark] 转发原生标题',
+        },
+      }));
     } finally {
       await stopChild(child);
     }

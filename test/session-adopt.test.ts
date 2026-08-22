@@ -88,6 +88,10 @@ vi.mock('../src/services/codex-app-threads.js', () => ({
   listCodexAppThreads: vi.fn(async () => []),
 }));
 
+vi.mock('../src/features/codex-notifier/desktop-ipc-client.js', () => ({
+  probeCodexDesktopThread: vi.fn(async () => 'codex-desktop-owner'),
+}));
+
 vi.mock('../src/core/worker-pool.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/core/worker-pool.js')>();
   return {
@@ -159,6 +163,7 @@ import * as sessionStore from '../src/services/session-store.js';
 import { deleteMessage, getMessageDetail } from '../src/im/lark/client.js';
 import { getBot } from '../src/bot-registry.js';
 import { listCodexAppThreads } from '../src/services/codex-app-threads.js';
+import { probeCodexDesktopThread } from '../src/features/codex-notifier/desktop-ipc-client.js';
 import { sessionKey } from '../src/core/types.js';
 import type { DaemonSession } from '../src/core/types.js';
 
@@ -246,6 +251,8 @@ function flush(): Promise<void> {
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe('Adopt card actions', () => {
+  const CODEX_THREAD_ID = '01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35';
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(getBot).mockReturnValue({
@@ -507,7 +514,7 @@ describe('Adopt card actions', () => {
       } as any);
       vi.mocked(listCodexAppThreads).mockResolvedValueOnce([
         {
-          threadId: 'thread-1',
+          threadId: CODEX_THREAD_ID,
           name: 'Existing Codex App thread',
           preview: 'preview',
           cwd: '/repo/codex-app',
@@ -519,17 +526,20 @@ describe('Adopt card actions', () => {
       sessions.set(sessionKey(ROOT_ID, APP_ID), ds);
       const deps = makeDeps(sessions);
 
-      const selectedValue = JSON.stringify({ threadId: 'thread-1' });
+      const selectedValue = JSON.stringify({ threadId: CODEX_THREAD_ID });
       await handleCardAction(makeCodexAppThreadSelectEvent(ROOT_ID, selectedValue), deps, APP_ID);
       await flush();
 
       expect(ds.adoptedFrom).toBeUndefined();
       expect(ds.workingDir).toBe('/repo/codex-app');
-      expect(ds.session.cliSessionId).toBe('thread-1');
+      expect(ds.session.cliSessionId).toBe(CODEX_THREAD_ID);
       expect(ds.session.cliId).toBe('codex-app');
+      expect(ds.session.codexAppTransport).toBe('desktop-ipc');
       expect(ds.session.adoptedFrom).toBeUndefined();
       expect(sessionStore.updateSession).toHaveBeenCalledWith(ds.session);
-      expect(forkWorker).toHaveBeenCalledWith(ds, '', true);
+      expect(probeCodexDesktopThread).toHaveBeenCalledWith(CODEX_THREAD_ID);
+      expect(killWorker).toHaveBeenCalledWith(ds);
+      expect(forkWorker).not.toHaveBeenCalled();
       expect(deleteMessage).toHaveBeenCalledWith(APP_ID, 'om_card_msg');
     });
 
@@ -546,7 +556,7 @@ describe('Adopt card actions', () => {
       } as any);
       vi.mocked(listCodexAppThreads).mockResolvedValueOnce([
         {
-          threadId: 'thread-1',
+          threadId: CODEX_THREAD_ID,
           name: 'Existing Codex App thread',
           preview: 'preview',
           cwd: '/repo/codex-app',
@@ -558,14 +568,14 @@ describe('Adopt card actions', () => {
       sessions.set(sessionKey(ROOT_ID, APP_ID), ds);
       const deps = makeDeps(sessions);
 
-      await handleCardAction(makeCodexAppThreadSelectEvent(ROOT_ID, JSON.stringify({ threadId: 'thread-1' })), deps, APP_ID);
+      await handleCardAction(makeCodexAppThreadSelectEvent(ROOT_ID, JSON.stringify({ threadId: CODEX_THREAD_ID })), deps, APP_ID);
       await flush();
 
       // Refused: no takeover, pending gate untouched.
       expect(forkWorker).not.toHaveBeenCalled();
       expect(ds.adoptedFrom).toBeUndefined();
       expect(ds.pendingRepo).toBe(true);
-      expect(ds.session.cliSessionId).not.toBe('thread-1');
+      expect(ds.session.cliSessionId).not.toBe(CODEX_THREAD_ID);
     });
   });
 

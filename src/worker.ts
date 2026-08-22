@@ -13521,6 +13521,7 @@ async function spawnCli(
     initialPrompt: preparedInitialPrompt,
     botName: cfg.botName,
     botOpenId: cfg.botOpenId,
+    nativeSessionTitle: cfg.nativeSessionTitle,
     larkAppId: cfg.larkAppId,
     locale: cfg.locale,
     model: ttadkGateway ? undefined : cfg.model,

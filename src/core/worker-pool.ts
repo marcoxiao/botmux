@@ -8716,6 +8716,9 @@ export function forkWorker(
   promptInput: string | CliTurnPayload,
   resumeOrTurnId: ForkResumeOrTurnId = false,
 ): boolean {
+  if (ds.session.codexAppTransport === 'desktop-ipc') {
+    throw new Error('Codex Desktop follower session cannot spawn a worker');
+  }
   const gatedPrompt = typeof promptInput === 'string' ? { content: promptInput } : promptInput;
   const remoteRetirementPhase = remoteRetirementAdmissionPhase(ds);
   if (remoteRetirementPhase) {
@@ -9078,7 +9081,8 @@ export function forkWorker(
   ensureCliEnv(agentCfg.cliId, agentCfg.cliPathOverride);
   let nativeSessionTitle: string | undefined;
   let nativeSessionTitlePrompt: string | undefined;
-  if (agentCfg.cliId === 'codex' && !ds.adoptedFrom) {
+  if ((agentCfg.cliId === 'codex' || agentCfg.cliId === 'codex-app') && !ds.adoptedFrom) {
+    const generatesSemanticTitle = agentCfg.cliId === 'codex';
     const isFreshNativeSession = !resume && !ds.session.cliSessionId;
     const titlePrompt = extractBotmuxLarkNativeSessionTitlePrompt(
       promptPayload.codexAppInput?.text ?? prompt,
@@ -9090,8 +9094,10 @@ export function forkWorker(
         bot.botName ? [{ name: bot.botName }] : undefined,
         ds.chatType === 'group' ? ds.session.chatDisplayName : undefined,
       );
-      ds.session.nativeSessionTitleAwaitingContent = titlePrompt ? undefined : true;
-      nativeSessionTitlePrompt = titlePrompt;
+      ds.session.nativeSessionTitleAwaitingContent = generatesSemanticTitle && !titlePrompt
+        ? true
+        : undefined;
+      nativeSessionTitlePrompt = generatesSemanticTitle ? titlePrompt : undefined;
       sessionStore.updateSession(ds.session);
     } else if (
       ds.session.nativeSessionTitleAwaitingContent
@@ -9100,13 +9106,15 @@ export function forkWorker(
     ) {
       ds.session.nativeSessionTitle = buildBotmuxLarkNativeSessionTitle(titlePrompt);
       ds.session.nativeSessionTitleAwaitingContent = undefined;
-      nativeSessionTitlePrompt = titlePrompt;
+      nativeSessionTitlePrompt = generatesSemanticTitle ? titlePrompt : undefined;
       sessionStore.updateSession(ds.session);
     } else if (isFreshNativeSession && !ds.session.nativeSessionTitle) {
       ds.session.nativeSessionTitle = ds.session.title;
       sessionStore.updateSession(ds.session);
     }
-    if (
+    if (agentCfg.cliId === 'codex-app') {
+      nativeSessionTitle = ds.session.nativeSessionTitle;
+    } else if (
       isFreshNativeSession
       || (resume && !!ds.session.cliSessionId && !!ds.session.nativeSessionTitle)
       || (

@@ -22,6 +22,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   transferring: new WeakSet<object>(),
+  probeCodexDesktopThread: vi.fn(async () => 'codex-desktop-owner'),
 }));
 
 vi.mock('@larksuiteoapi/node-sdk', () => {
@@ -61,6 +62,12 @@ vi.mock('../src/bot-registry.js', async () => {
     })),
   };
 });
+
+vi.mock('../src/features/codex-notifier/desktop-ipc-client.js', () => ({
+  probeCodexDesktopThread: mocks.probeCodexDesktopThread,
+  sendCodexDesktopThreadTurn: vi.fn(),
+  CodexDesktopUnavailableError: class CodexDesktopUnavailableError extends Error {},
+}));
 
 import {
   __testOnly_notifierAdoptStaleOrTransferring as staleOrTransferring,
@@ -228,15 +235,16 @@ describe('P2 · clear actually removes what the predicate flagged', () => {
 
 // ─── P2#2 integration: guard placement OUTSIDE the launch branch ────────────
 // A pure-helper test cannot prove WHERE the transfer guard sits. Drive the real
-// adoptCodexNotifierEvent control flow with a session that is ALREADY on the
-// target thread with a live worker (so the launch/re-fork branch is skipped
-// entirely). Only an out-of-branch guard can still catch an in-flight transfer.
+// adoptCodexNotifierEvent control flow with a session that is ALREADY bound to
+// the target Codex Desktop thread. There is intentionally no BotMux worker:
+// native follow-up turns must go through the Desktop owner IPC transport.
 describe('P2#2 · adoptCodexNotifierEvent transfer guard (integration)', () => {
+  const THREAD_ID = '01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35';
   const EVENT = {
     eventId: 'e'.repeat(64),
     type: 'codex_task_completed',
     source: 'codex-app',
-    threadId: 'thread-live',
+    threadId: THREAD_ID,
     nativeTurnId: 'nt-1',
     status: 'completed',
     cwd: '/repos/live',
@@ -245,17 +253,23 @@ describe('P2#2 · adoptCodexNotifierEvent transfer guard (integration)', () => {
   } as any;
 
   function liveAdoptedDs(): DaemonSession {
-    // Same thread as EVENT + a live worker → the `cliSessionId !== threadId ||
-    // !worker || worker.killed` launch branch is FALSE (skipped).
+    // Same thread + Desktop IPC transport → the binding branch is skipped.
     return makeDs({
-      session: { sessionId: 'sid-live', status: 'active', cliSessionId: 'thread-live' } as any,
-      worker: { killed: false } as any,
+      session: {
+        sessionId: 'sid-live',
+        status: 'active',
+        cliSessionId: THREAD_ID,
+        codexAppTransport: 'desktop-ipc',
+      } as any,
+      worker: null,
       workingDir: '/repos/live',
     });
   }
 
   beforeEach(() => {
     mocks.transferring = new WeakSet();
+    mocks.probeCodexDesktopThread.mockReset();
+    mocks.probeCodexDesktopThread.mockResolvedValue('codex-desktop-owner');
     activeSessions.clear();
   });
 
@@ -270,13 +284,36 @@ describe('P2#2 · adoptCodexNotifierEvent transfer guard (integration)', () => {
     ).rejects.toThrow(/转移/); // "该会话正在转移，暂时无法接管…"
   });
 
-  it('same-thread live worker + NOT transferring → returns the green adopt card (idempotent re-click)', async () => {
+  it('same-thread Desktop binding + NOT transferring → probes the real owner before returning green', async () => {
     const ds = liveAdoptedDs();
     activeSessions.set(sessionKey('oc_dm', 'cli_app'), ds);
     // no transfer gate → the out-of-branch guard is a no-op
 
     const ctrl = new AbortController();
     const card = await adoptEvent('cli_app', EVENT, 'om_card', 'ou_owner', ctrl.signal, Date.now() + 2200);
-    expect(JSON.stringify(card)).toContain('已接管');
+    expect(mocks.probeCodexDesktopThread).toHaveBeenCalledWith(THREAD_ID);
+    expect(JSON.stringify(card)).toContain('已连接');
+  });
+
+  it('same-thread binding + Desktop owner missing → rejects instead of returning a false green card', async () => {
+    const ds = liveAdoptedDs();
+    activeSessions.set(sessionKey('oc_dm', 'cli_app'), ds);
+    mocks.probeCodexDesktopThread.mockRejectedValueOnce(new Error('Codex App 当前离线'));
+
+    const ctrl = new AbortController();
+    await expect(
+      adoptEvent('cli_app', EVENT, 'om_card', 'ou_owner', ctrl.signal, Date.now() + 2200),
+    ).rejects.toThrow('Codex App 当前离线');
+  });
+
+  it('new binding + Desktop owner missing → leaves no orphan BotMux session', async () => {
+    mocks.probeCodexDesktopThread.mockRejectedValueOnce(new Error('Codex App 当前离线'));
+
+    const ctrl = new AbortController();
+    await expect(
+      adoptEvent('cli_app', EVENT, 'om_card', 'ou_owner', ctrl.signal, Date.now() + 2200),
+    ).rejects.toThrow('Codex App 当前离线');
+
+    expect(activeSessions.size).toBe(0);
   });
 });

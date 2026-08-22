@@ -122,6 +122,9 @@ export interface CliAdapter {
     initialPrompt?: string;
     botName?: string;
     botOpenId?: string;
+    /** User-facing native thread title. Runner-backed adapters may forward it
+     *  to their native session store after the first user turn is persisted. */
+    nativeSessionTitle?: string;
     /** This bot's larkAppId. Lets injectsSessionContext adapters (genius) resolve
      *  their per-bot built-in skill injection mode for the system-prompt catalog;
      *  inline-prompt CLIs get theirs from session-manager instead. */

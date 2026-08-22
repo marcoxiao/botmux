@@ -552,6 +552,16 @@ describe('codex-app buildArgs', () => {
     expect(args).toContain('--thread-id');
     expect(args).toContain('thread-123');
   });
+
+  it('forwards the user-facing native session title to the Codex App runner', () => {
+    const args = adapter.buildArgs({
+      sessionId: 'sess-app',
+      resume: false,
+      nativeSessionTitle: '[BotMux·Lark] 测试修复',
+    });
+    expect(args).toContain('--thread-name');
+    expect(args).toContain('[BotMux·Lark] 测试修复');
+  });
 });
 
 describe('mira buildArgs', () => {

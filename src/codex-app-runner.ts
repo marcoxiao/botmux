@@ -50,6 +50,7 @@ interface Args {
   controlSocketPath?: string;
   controlLocatorPath?: string;
   threadId?: string;
+  threadName?: string;
   botName?: string;
   botOpenId?: string;
   locale?: string;
@@ -244,6 +245,7 @@ function parseArgs(argv: string[]): Args {
     else if (key === '--codex-bin' && val !== undefined) { out.codexBin = val; i++; }
     else if (key === '--cwd' && val !== undefined) { out.cwd = val; i++; }
     else if (key === '--thread-id' && val !== undefined) { out.threadId = val; i++; }
+    else if (key === '--thread-name' && val !== undefined) { out.threadName = val; i++; }
     else if (key === '--bot-name' && val !== undefined) { out.botName = val; i++; }
     else if (key === '--bot-open-id' && val !== undefined) { out.botOpenId = val; i++; }
     else if (key === '--locale' && val !== undefined) { out.locale = val; i++; }
@@ -719,6 +721,28 @@ let threadId = args.threadId;
 let threadReady = false;
 let activeTurn: ActiveTurn | null = null;
 let activeTurnEpoch = 0;
+let namedThreadId: string | undefined;
+let threadNameSync: Promise<void> | undefined;
+
+/** Apply the Lark-facing semantic title through the owning app-server client.
+ * Fresh threads are named only after turn/start accepts the first user message:
+ * before that point Codex has no persisted preview and may drop thread/name/set. */
+function syncThreadName(targetThreadId: string): Promise<void> {
+  const name = args.threadName?.trim();
+  if (!name || namedThreadId === targetThreadId) return Promise.resolve();
+  if (threadNameSync) return threadNameSync;
+  threadNameSync = client.request('thread/name/set', {
+    threadId: targetThreadId,
+    name,
+  }, { timeoutMs: 2_000 }).then(() => {
+    namedThreadId = targetThreadId;
+  }).catch((err: unknown) => {
+    writeLine(`[codex-app] thread title sync failed: ${asError(err).message}`);
+  }).finally(() => {
+    threadNameSync = undefined;
+  });
+  return threadNameSync;
+}
 /** App-server may start a Goal continuation without a Botmux input. Keep that
  * native lifecycle separate from `activeTurn`; otherwise the next Lark input
  * is incorrectly sent with turn/start and its completion can be discarded as
@@ -1538,6 +1562,7 @@ async function ensureThread(startupDeadlineAtMs?: number): Promise<string> {
       threadId = resumedThreadId;
       threadReady = true;
       emitMarker('thread', { threadId: resumedThreadId });
+      void syncThreadName(resumedThreadId);
       return resumedThreadId;
     } catch (err: any) {
       // A transport error or timeout is an ambiguous acceptance boundary. It
@@ -1577,10 +1602,6 @@ async function ensureThread(startupDeadlineAtMs?: number): Promise<string> {
   threadId = startedThreadId;
   threadReady = true;
   emitMarker('thread', { threadId: startedThreadId });
-  void client.request('thread/name/set', {
-      threadId: startedThreadId,
-      name: `botmux ${args.sessionId.slice(0, 8)}`,
-    }, { timeoutMs: 2_000 }).catch(() => { /* naming is cosmetic */ });
   return startedThreadId;
 }
 
@@ -2210,6 +2231,7 @@ async function runTurn(message: QueuedInput): Promise<void> {
   turn.nativeTurnId = responseNativeId;
   turn.requestAccepted = true;
   turn.startResponsePending = false;
+  if (turn.requestKind === 'start') void syncThreadName(tid);
   // The root request is accepted → its native id is now canonical for the group,
   // so pre-final follow-up steers may bind against it (canSteer). A plain start
   // is proven by its start-response; a Goal-continuation root is proven by the
@@ -2447,7 +2469,7 @@ function handleInput(data: Buffer): void {
   const text = data.toString('utf8');
   for (const ch of text) {
     if (ch === '\u0003') {
-      process.exit(130);
+      void shutdown(130);
     } else if (ch === '\r' || ch === '\n') {
       const line = inputBuffer;
       inputBuffer = '';
@@ -2492,21 +2514,40 @@ async function main(): Promise<void> {
   prompt();
 }
 
-process.on('SIGTERM', () => {
-  cancelRunnerIdleSettle();
-  if (controlReconnectTimer) clearTimeout(controlReconnectTimer);
-  controlSocket?.destroy();
-  client?.close();
-  process.exit(0);
-});
+let shutdownStarted = false;
 
-process.on('SIGINT', () => {
+async function shutdown(exitCode: number): Promise<void> {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  controlFatal = true;
   cancelRunnerIdleSettle();
   if (controlReconnectTimer) clearTimeout(controlReconnectTimer);
   controlSocket?.destroy();
+  const targetThreadId = threadId;
+  if (client && targetThreadId) {
+    const nativeTurnId = activeTurn?.canonicalNativeTurnId ?? activeTurn?.nativeTurnId;
+    if (activeTurn && !activeTurn.completed && nativeTurnId) {
+      try {
+        await client.request('turn/interrupt', {
+          threadId: targetThreadId,
+          turnId: nativeTurnId,
+        }, { timeoutMs: 1_000 });
+      } catch { /* shutdown remains best-effort and bounded */ }
+    }
+    try {
+      await client.request('thread/unsubscribe', { threadId: targetThreadId }, { timeoutMs: 1_000 });
+    } catch { /* older app-server versions may not support unsubscribe */ }
+  }
   client?.close();
-  process.exit(130);
-});
+  process.exit(exitCode);
+}
+
+process.on('SIGTERM', () => { void shutdown(0); });
+process.on('SIGINT', () => { void shutdown(130); });
+// node-pty closes local sessions with SIGHUP, not SIGTERM. Without this handler
+// the runner skipped turn interruption + unsubscribe and left Codex Desktop
+// showing the thread as owned by another client until its stale state cleared.
+process.on('SIGHUP', () => { void shutdown(0); });
 
 main().catch(err => {
   if (!runnerReady && err instanceof AppServerRequestTimeoutError) {
