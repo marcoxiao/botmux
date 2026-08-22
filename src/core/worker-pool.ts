@@ -409,6 +409,7 @@ import {
   sessionAnchorId,
   storedSessionAnchorId,
   isDocNativeSession,
+  isHttpVirtualSession,
   larkTransportEnabled,
   remoteRetirementAdmissionPhase,
   type DaemonSession,
@@ -439,6 +440,17 @@ import { isLocalCliOpenEnabled, isLocalCliOpenReady } from '../services/local-cl
 import { sessionConfiguredRuntimeDisplayName } from './cli-runtime-display.js';
 import { isSilentScheduledTurn } from './silent-schedule-turns.js';
 import { isTriggerFinalSuppressed } from './trigger-final-suppression.js';
+import {
+  handleTurnProgressExternalReply,
+  handleTurnProgressFact,
+  handleTurnProgressResumed,
+  handleTurnProgressSteer,
+  handleTurnProgressTerminal,
+  handleTurnProgressWaiting,
+  semanticProgressSuppressesLegacyCard,
+  type TurnProgressControllerDeps,
+} from './turn-progress/controller.js';
+import type { TurnProgressEligibilityInput } from './turn-progress/eligibility.js';
 import { writeDeferredTopicBinding } from './deferred-topic-binding.js';
 import {
   currentDeviceIsolationFreezeLease,
@@ -758,6 +770,31 @@ function streamingCardDisabled(ds: DaemonSession, turnId?: string): boolean {
       // Callers with a turnId (screen updates) get an exact per-turn answer.
       || isSubstituteTurn(ds, turnId);
   } catch { return false; }
+}
+
+function turnProgressEligibilityFor(
+  ds: DaemonSession,
+  turnId?: string,
+  dispatchAttempt?: number,
+): TurnProgressEligibilityInput {
+  let larkTransport = false;
+  try {
+    larkTransport = larkTransportEnabled({
+      chatId: ds.chatId,
+      apiOnly: getBot(ds.larkAppId).config.apiOnly,
+    });
+  } catch { /* missing bot remains fail-closed */ }
+  const armedThrough = turnId ? ds.suppressedFinalOutputTurns?.get(turnId) : undefined;
+  return {
+    larkTransport,
+    http: isHttpVirtualSession(ds.chatId),
+    docComment: isDocNativeSession(ds) || !!(turnId && resolveDocCommentTarget(ds, turnId)),
+    vcReceiver: !!ds.session.vcMeetingReceiver,
+    vcListener: !!(turnId && resolveVcMeetingImTurnOrigin(ds.session, turnId)),
+    substitute: isSubstituteTurn(ds, turnId),
+    managedOrSilent: isSilentScheduledTurn(ds, turnId)
+      || armedThrough !== undefined && (dispatchAttempt === undefined || dispatchAttempt <= armedThrough),
+  };
 }
 
 function silentTurnReactions(ds: DaemonSession): boolean {
@@ -1972,6 +2009,7 @@ export async function postTurnStartingCard(
   if (ds.session.vcMeetingReceiver || streamingCardDisabled(ds, turnId)) return false;
   if (!workerHasInitialized(ds)) return false;
   if (!larkTransportEnabled({ chatId: ds.chatId, apiOnly: getBot(ds.larkAppId).config.apiOnly })) return false;
+  if (semanticProgressSuppressesLegacyCard(ds, turnId, turnProgressEligibilityFor(ds, turnId))) return false;
 
   const generation = ds.streamCardTurnGeneration ?? 0;
   const sessionAtPost = ds.session;
@@ -2870,6 +2908,8 @@ export function killWorker(
     );
     return;
   }
+  ds.turnProgressHost?.dispose();
+  ds.turnProgressHost = undefined;
   restartCoordinator.cancelSession(ds.session.sessionId);
   clearUsageLimitState(ds);
   ds.workerReady = false;
@@ -4843,6 +4883,8 @@ export function suspendWorker(ds: DaemonSession, reason = 'suspended_idle'): boo
   if (!isSuspendableBackendType(ds.initConfig?.backendType)) return false;
 
   const w = ds.worker;
+  ds.turnProgressHost?.dispose();
+  ds.turnProgressHost = undefined;
   trackLifecycleRetirement(ds, w);
   try {
     w.send({ type: 'suspend' } as DaemonToWorker);
@@ -9797,6 +9839,13 @@ function setupWorkerHandlers(
       ? { ...opts, sourceSessionId: ds.session.sessionId }
       : opts,
   );
+  const progressDeps: TurnProgressControllerDeps = {
+    reply: (cardRefJson, turnId, uuid) =>
+      scopedReply(cardRefJson, 'interactive', turnId, { uuid }),
+    reactDone: async primaryTurnId => {
+      await addReaction(ds.larkAppId, primaryTurnId, doneReactionEmojiFor(ds));
+    },
+  };
   const ordinaryManagedSuppression = (
     turnId?: string,
     dispatchAttempt?: number,
@@ -10548,6 +10597,23 @@ function setupWorkerHandlers(
         break;
       }
 
+      case 'turn_progress': {
+        const result = await handleTurnProgressFact(
+          ds,
+          msg,
+          workerGeneration,
+          turnProgressEligibilityFor(ds, msg.turnId, msg.dispatchAttempt),
+          progressDeps,
+        );
+        if (result === 'handled' && msg.fact.kind === 'turn_started') {
+          ds.streamCardPending = false;
+          ds.streamCardPendingTurnId = undefined;
+        } else if (result === 'fallback') {
+          await postTurnStartingCard(ds, cb.sessionReply, msg.turnId);
+        }
+        break;
+      }
+
       case 'screen_update': {
         if (!ownsLifecycleMutation()) break;
         // Wait for worker init, independently of Web Terminal availability.
@@ -10650,6 +10716,15 @@ function setupWorkerHandlers(
         // redraws on resume. Stay silent (no post/patch) until the first real
         // user turn clears the flag. Dashboard SSE above still reflects status.
         if (ds.suppressRecoveryCard) { clearUsageRefreshTimer(ds); break; }
+
+        if (semanticProgressSuppressesLegacyCard(
+          ds,
+          msg.turnId,
+          turnProgressEligibilityFor(ds, msg.turnId, msg.dispatchAttempt),
+        )) {
+          clearUsageRefreshTimer(ds);
+          break;
+        }
 
         const readUrl = readableTerminalUrlFor(ds);
         const turnTitle = ds.currentTurnTitle || ds.session.title || sessionCliDisplayName(ds, botCfg);
@@ -10812,6 +10887,11 @@ function setupWorkerHandlers(
           persistStreamCardState(ds);
           break;
         }
+        if (semanticProgressSuppressesLegacyCard(
+          ds,
+          msg.turnId,
+          turnProgressEligibilityFor(ds, msg.turnId, msg.dispatchAttempt),
+        )) break;
         // Store the image key only AFTER the managed gate: now that the ready
         // handler re-syncs display mode on every path, a worker can be
         // uploading during a suppressed managed/silent turn — letting that
@@ -10876,6 +10956,13 @@ function setupWorkerHandlers(
         // session.title; publishing this prompt description as `patch.title`
         // would temporarily overwrite a user-issued /rename until refresh.
         ds.currentTurnTitle = msg.description;
+        await handleTurnProgressWaiting(
+          ds,
+          msg.turnId,
+          msg.description,
+          turnProgressEligibilityFor(ds, msg.turnId, msg.dispatchAttempt),
+          progressDeps,
+        );
         if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) {
           logger.info(`[${t}] Managed/silent turn — TUI prompt kept in lifecycle audit only`);
           break;
@@ -10949,6 +11036,12 @@ function setupWorkerHandlers(
           );
           break;
         }
+        await handleTurnProgressResumed(
+          ds,
+          msg.turnId,
+          turnProgressEligibilityFor(ds, msg.turnId, msg.dispatchAttempt),
+          progressDeps,
+        );
         const hadAuthority = hasTuiPromptAuthority(ds);
         if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) {
           clearTuiPromptAuthority(ds);
@@ -11506,6 +11599,12 @@ function setupWorkerHandlers(
             replyMessageId: msg.messageId,
           });
         }
+        await handleTurnProgressExternalReply(
+          ds,
+          msg.turnId,
+          turnProgressEligibilityFor(ds, msg.turnId),
+          progressDeps,
+        );
         break;
       }
 
@@ -11533,6 +11632,7 @@ function setupWorkerHandlers(
           `[${t}] Codex App steer accepted `
           + `appTurn=${msg.appTurnId.slice(0, 12)} replyTurn=${msg.turnId.slice(0, 12)}`,
         );
+        handleTurnProgressSteer(ds, msg.turnId);
         if (managedAuxUiSuppressed(msg.turnId, undefined)) break;
         try {
           await scopedReply(tr('worker.steer_accepted', undefined, loc), 'text', msg.turnId);
@@ -11738,6 +11838,12 @@ function setupWorkerHandlers(
         } catch (err: any) {
           logger.error(`[${t}] Failed to settle deferred schedule turn ${msg.turnId.substring(0, 8)}: ${err.message}`);
         }
+        await handleTurnProgressTerminal(
+          ds,
+          msg,
+          turnProgressEligibilityFor(ds, msg.turnId, msg.dispatchAttempt),
+          progressDeps,
+        );
         break;
       }
 
@@ -13001,6 +13107,8 @@ function reserveWorkerGeneration(ds: DaemonSession): number {
     throw error;
   }
   if (previousPreviewTarget !== undefined) publishSessionPreviewCleared(ds.session.sessionId);
+  ds.turnProgressHost?.dispose();
+  ds.turnProgressHost = undefined;
   // Reservation is the first durable proof that the previous generation has
   // lost authority. Clear its TUI slot before any environment check, adapter
   // creation, or fork can throw and strand a clicked card in "processing".

@@ -159,8 +159,9 @@ export class TurnProgressHost {
   owns(turnId: string, dispatchAttempt?: number): boolean {
     const binding = this.binding;
     if (!binding || this.disposed || !binding.memberTurnIds.includes(turnId)) return false;
-    return binding.primaryDispatchAttempt === dispatchAttempt
-      || binding.primaryDispatchAttempt === undefined && dispatchAttempt === undefined;
+    return dispatchAttempt === undefined
+      || binding.primaryDispatchAttempt === undefined
+      || binding.primaryDispatchAttempt === dispatchAttempt;
   }
 
   bindSteer(turnId: string): void {
