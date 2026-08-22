@@ -370,4 +370,72 @@ describe('TurnProgressHost', () => {
     expect(JSON.parse(io.update.mock.calls[0][1]).state.restored).toBe(true);
     expect(io.update.mock.calls[0][2]).toBe(11);
   });
+
+  it('falls back without overwriting the card when a restored projection is unavailable', async () => {
+    const io = harness();
+    const binding: TurnProgressBindingV1 = {
+      schemaVersion: 1,
+      pluginId: 'semantic-progress',
+      primaryTurnId: 'turn-1',
+      primaryDispatchAttempt: 1,
+      memberTurnIds: ['turn-1'],
+      workerGeneration: 7,
+      cardId: 'card-1',
+      messageId: 'message-1',
+      replyUuid: 'tp_r_existing',
+      cardSequence: 9,
+      deliveryState: 'active',
+    };
+    const host = TurnProgressHost.restore(
+      plugin({ failInitial: true }).value,
+      context({ restored: true }),
+      binding,
+      io.deps,
+    );
+
+    await expect(host.settleTerminal({ kind: 'terminal', status: 'failed' }))
+      .resolves.toEqual({ kind: 'fallback' });
+
+    expect(io.update).not.toHaveBeenCalled();
+    expect(io.persisted.at(-1)).toBeUndefined();
+  });
+
+  it('lets an in-flight canonical final own settlement after restored projection failure', async () => {
+    const io = harness();
+    const binding: TurnProgressBindingV1 = {
+      schemaVersion: 1,
+      pluginId: 'semantic-progress',
+      primaryTurnId: 'turn-1',
+      primaryDispatchAttempt: 1,
+      memberTurnIds: ['turn-1'],
+      workerGeneration: 7,
+      cardId: 'card-1',
+      messageId: 'message-1',
+      replyUuid: 'tp_r_existing',
+      cardSequence: 9,
+      deliveryState: 'active',
+    };
+    const host = TurnProgressHost.restore(
+      plugin({ failInitial: true }).value,
+      context({ restored: true }),
+      binding,
+      io.deps,
+    );
+    let release!: () => void;
+    io.update.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+
+    const final = host.deliverFinal(JSON.stringify({ schema: '2.0', body: { elements: [] } }));
+    await vi.waitFor(() => expect(io.update).toHaveBeenCalledOnce());
+
+    await expect(host.settleTerminal({ kind: 'terminal', status: 'failed' }))
+      .resolves.toEqual({ kind: 'not_applicable' });
+    expect(io.persisted.at(-1)).toMatchObject({ deliveryState: 'finalizing' });
+    expect(io.update).toHaveBeenCalledOnce();
+
+    release();
+    await expect(final).resolves.toEqual({ kind: 'delivered', messageId: 'message-1' });
+    expect(io.persisted.at(-1)).toMatchObject({ deliveryState: 'finalizing' });
+    host.ackFinal('turn-1');
+    expect(io.persisted.at(-1)).toBeUndefined();
+  });
 });

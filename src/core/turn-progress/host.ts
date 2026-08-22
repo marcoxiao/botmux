@@ -200,6 +200,13 @@ export class TurnProgressHost {
     event: Extract<TurnProgressEventInput, { kind: 'terminal' }>,
   ): Promise<FinalCardDelivery> {
     if (!this.binding || this.disposed) return Promise.resolve({ kind: 'not_applicable' });
+    if (this.finalDelivery) return Promise.resolve({ kind: 'not_applicable' });
+    if (this.projectionIsolated) {
+      this.deps.persist(undefined);
+      this.binding = undefined;
+      this.dispose();
+      return Promise.resolve({ kind: 'fallback' });
+    }
     let cardJson: string;
     try {
       cardJson = this.terminal
