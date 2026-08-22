@@ -342,6 +342,8 @@ git commit -m "feat: add minimal cardkit entity adapters"
 - 普通 progress update 失败不无限重试；final 的 retryable/ambiguous 以封顶退避持续重试相同 intent；permanent 返回 fresh-final fallback；
 - final update 成功后 binding 保持 `finalizing`；只有 Core 显式 ACK 才清除，紧随其后的 terminal 不得抢先释放；
 - terminal 后丢弃迟到 progress；worker generation、turn、attempt 不匹配时不调用插件；
+- terminal 只能收口已存在的 host/binding，不能从零创建卡；没有 canonical final 的终态复用 durable final intent 更新原卡，成功 ACK 后清 binding；
+- CardKit create 返回后、reply/update/retry 前都重验当前 worker generation authority；失权后不继续外部写入；
 - 同一 worker generation 内 `fact.seq <= lastFactSeq` 直接丢弃；lifecycle 与 provider fact 进入 reducer 前由 host 分配统一的本地单调 event seq；
 - ordered steer alias 最多保存 primary + 最近 31 个成员；final 命中最新 alias，reaction 仍加 primary turn message；
 - 新的独立执行单元只有在上一 binding 已收口后才能 start；不得覆盖仍 active/finalizing 的 binding；
@@ -389,6 +391,7 @@ turnProgressLegacyFallbackTurns?: Set<string>;
 
 ```ts
 export interface TurnProgressHostDeps {
+  active(): boolean;
   create(cardJson: string): Promise<string>;
   reply(cardRefJson: string, turnId: string, uuid: string): Promise<string>;
   update(cardId: string, cardJson: string, sequence: number, uuid: string): Promise<void>;
@@ -422,6 +425,7 @@ export class TurnProgressHost {
   bindSteer(turnId: string): void;
   dispatchFact(fact: TurnProgressFactV1): void;
   dispatch(event: Omit<TurnProgressEventV1, 'schemaVersion' | 'seq'>, boundary: boolean): void;
+  settleTerminal(event: Omit<Extract<TurnProgressEventV1, { kind: 'terminal' }>, 'schemaVersion' | 'seq'>): Promise<FinalCardDelivery>;
   deliverFinal(cardJson: string): Promise<FinalCardDelivery>;
   ackFinal(turnId: string): void;
   dispose(): void;

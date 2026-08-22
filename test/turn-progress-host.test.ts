@@ -88,7 +88,7 @@ function harness() {
     reactDone,
     persist,
     sleep,
-    deps: { create, reply, update, reactDone, persist, sleep, now: () => Date.now() },
+    deps: { active: () => true, create, reply, update, reactDone, persist, sleep, now: () => Date.now() },
   };
 }
 

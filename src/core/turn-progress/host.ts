@@ -13,6 +13,7 @@ type TurnProgressEventInput = TurnProgressEventV1 extends infer Event
   : never;
 
 export interface TurnProgressHostDeps {
+  active(): boolean;
   create(cardJson: string): Promise<string>;
   reply(cardRefJson: string, turnId: string, uuid: string): Promise<string>;
   update(cardId: string, cardJson: string, sequence: number, uuid: string): Promise<void>;
@@ -90,6 +91,7 @@ export class TurnProgressHost {
     context: TurnProgressContextV1,
     deps: TurnProgressHostDeps,
   ): Promise<TurnProgressHost | null> {
+    if (!deps.active()) return null;
     let state: unknown;
     let cardJson: string;
     try {
@@ -107,6 +109,9 @@ export class TurnProgressHost {
       logger.error(`[turn-progress] card create failed plugin=${pluginId}: ${String(error)}`);
       return null;
     }
+    // The entity is not visible until IM reply attachment. If the worker lost
+    // authority during create, abandon it without persisting or posting.
+    if (!deps.active()) return null;
 
     const replyUuid = stableUuid('tp_r', context.sessionId, context.primaryTurnId, context.dispatchAttempt);
     const replying: TurnProgressBindingV1 = {
@@ -187,12 +192,36 @@ export class TurnProgressHost {
   }
 
   dispatch(event: TurnProgressEventInput, boundary: boolean): void {
+    const cardJson = this.project(event);
+    if (cardJson) this.enqueue({ cardJson, final: false, boundary }, boundary);
+  }
+
+  settleTerminal(
+    event: Extract<TurnProgressEventInput, { kind: 'terminal' }>,
+  ): Promise<FinalCardDelivery> {
+    if (!this.binding || this.disposed) return Promise.resolve({ kind: 'not_applicable' });
+    let cardJson: string;
+    try {
+      cardJson = this.terminal
+        ? renderCard(this.plugin, this.state, this.context)
+        : this.project(event) ?? renderCard(this.plugin, this.state, this.context);
+    } catch (error) {
+      logger.error(`[turn-progress] terminal projection failed plugin=${this.binding.pluginId}: ${String(error)}`);
+      this.deps.persist(undefined);
+      this.binding = undefined;
+      this.dispose();
+      return Promise.resolve({ kind: 'fallback' });
+    }
+    return this.beginFinalDelivery(cardJson, event.status === 'completed');
+  }
+
+  private project(event: TurnProgressEventInput): string | undefined {
     if (this.terminal || this.disposed || this.projectionIsolated) return;
     if (event.kind === 'terminal' || event.kind === 'external_reply') this.terminal = true;
     const sequenced = { ...event, schemaVersion: 1 as const, seq: ++this.eventSeq } as TurnProgressEventV1;
     try {
       this.state = this.plugin.reduce(this.state, sequenced, this.context);
-      this.enqueue({ cardJson: renderCard(this.plugin, this.state, this.context), final: false, boundary }, boundary);
+      return renderCard(this.plugin, this.state, this.context);
     } catch (error) {
       this.projectionIsolated = true;
       logger.error(`[turn-progress] projection isolated plugin=${this.binding?.pluginId ?? 'unknown'}: ${String(error)}`);
@@ -200,12 +229,16 @@ export class TurnProgressHost {
   }
 
   deliverFinal(cardJson: string): Promise<FinalCardDelivery> {
+    return this.beginFinalDelivery(cardJson, true);
+  }
+
+  private beginFinalDelivery(cardJson: string, reactDone: boolean): Promise<FinalCardDelivery> {
     if (this.finalDelivery) return this.finalDelivery;
     if (!this.binding || this.disposed) return Promise.resolve({ kind: 'not_applicable' });
     this.terminal = true;
     this.pending = undefined;
     this.clearTimer();
-    const delivery = this.runFinal(cardJson);
+    const delivery = this.runFinal(cardJson, reactDone);
     this.finalDelivery = delivery;
     void delivery.catch(() => {
       if (this.finalDelivery === delivery) this.finalDelivery = undefined;
@@ -233,7 +266,7 @@ export class TurnProgressHost {
     if (!binding || binding.deliveryState !== 'replying') return !!binding?.messageId;
     let delayMs = 250;
     for (;;) {
-      if (this.disposed) return false;
+      if (this.disposed || !this.deps.active()) return false;
       try {
         const messageId = await this.deps.reply(
           JSON.stringify({ type: 'card', data: { card_id: binding.cardId } }),
@@ -257,6 +290,7 @@ export class TurnProgressHost {
           this.dispose();
           return false;
         }
+        if (!this.deps.active()) return false;
         await this.deps.sleep(delayMs);
         delayMs = Math.min(delayMs * 2, 4_000);
       }
@@ -294,12 +328,13 @@ export class TurnProgressHost {
     });
   }
 
-  private async runFinal(cardJson: string): Promise<FinalCardDelivery> {
+  private async runFinal(cardJson: string, reactDone: boolean): Promise<FinalCardDelivery> {
     if (this.attachment) await this.attachment;
     while (this.inFlight) await this.inFlight;
     let delayMs = 250;
     const snapshot = { cardJson, final: true, boundary: true };
     for (;;) {
+      if (!this.deps.active()) return { kind: 'not_applicable' };
       const binding = this.binding;
       if (!binding || this.disposed) return { kind: 'not_applicable' };
       const work = this.performUpdate(snapshot);
@@ -312,8 +347,10 @@ export class TurnProgressHost {
         if (this.inFlight === guard) this.inFlight = undefined;
       }
       if (outcome === 'succeeded') {
-        try { await this.deps.reactDone(binding.primaryTurnId); } catch (error) {
-          logger.debug(`[turn-progress] completion reaction failed: ${String(error)}`);
+        if (reactDone) {
+          try { await this.deps.reactDone(binding.primaryTurnId); } catch (error) {
+            logger.debug(`[turn-progress] completion reaction failed: ${String(error)}`);
+          }
         }
         return binding.messageId
           ? { kind: 'delivered', messageId: binding.messageId }
@@ -331,6 +368,7 @@ export class TurnProgressHost {
   }
 
   private async performUpdate(snapshot: PendingSnapshot): Promise<UpdateOutcome> {
+    if (!this.deps.active()) return 'ambiguous';
     const binding = this.binding;
     if (!binding) return 'permanent';
     const cardHash = hash(snapshot.cardJson);

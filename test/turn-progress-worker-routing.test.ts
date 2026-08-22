@@ -240,6 +240,7 @@ describe('turn progress worker routing controller', () => {
     release();
 
     await expect(delivery).resolves.toBe('ignored');
+    expect(deps.reply).not.toHaveBeenCalled();
     expect(ds.turnProgressHost).toBeUndefined();
   });
 
@@ -301,6 +302,36 @@ describe('turn progress worker routing controller', () => {
     const cards = mocks.update.mock.calls.map(call => JSON.parse(call[2] as string));
     expect(JSON.stringify(cards)).toContain('请选择 用户');
     expect(JSON.stringify(cards)).not.toContain('<at');
+    expect(ds.session.turnProgressBinding).toBeUndefined();
+    expect(deps.reactDone).toHaveBeenCalledWith('turn-1');
+
+    await handleTurnProgressFact(ds, {
+      type: 'turn_progress', sessionId: 'session-1', turnId: 'turn-3', dispatchAttempt: 2,
+      fact: { schemaVersion: 1, seq: 2, atMs: 2, kind: 'turn_started' },
+    }, 3, eligible, deps);
+    expect(mocks.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('settles a terminal-only failure so the next execution unit can start', async () => {
+    const ds = daemonSession();
+    await handleTurnProgressFact(ds, {
+      type: 'turn_progress', sessionId: 'session-1', turnId: 'turn-1', dispatchAttempt: 1,
+      fact: { schemaVersion: 1, seq: 1, atMs: 1, kind: 'turn_started' },
+    }, 3, eligible, deps);
+
+    await handleTurnProgressTerminal(ds, {
+      type: 'turn_terminal', sessionId: 'session-1', turnId: 'turn-1', dispatchAttempt: 1,
+      status: 'failed', errorCode: 'provider_failed',
+    }, eligible, deps);
+
+    expect(ds.session.turnProgressBinding).toBeUndefined();
+    expect(deps.reactDone).not.toHaveBeenCalled();
+
+    await handleTurnProgressFact(ds, {
+      type: 'turn_progress', sessionId: 'session-1', turnId: 'turn-2', dispatchAttempt: 2,
+      fact: { schemaVersion: 1, seq: 2, atMs: 2, kind: 'turn_started' },
+    }, 3, eligible, deps);
+    expect(mocks.create).toHaveBeenCalledTimes(2);
   });
 
   it('restores an active durable binding without creating another entity', async () => {

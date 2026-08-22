@@ -52,6 +52,7 @@ import {
   deliverFinalThroughProgressCard,
   handleTurnProgressFact,
   handleTurnProgressSteer,
+  handleTurnProgressTerminal,
 } from '../src/core/turn-progress/controller.js';
 
 function daemonSession(): DaemonSession {
@@ -139,6 +140,24 @@ describe('turn progress canonical final delivery', () => {
     acknowledgeProgressFinal(ds, 'turn-2');
     expect(ds.session.turnProgressBinding).toBeUndefined();
     expect(ds.turnProgressHost).toBeUndefined();
+  });
+
+  it('does not recreate a progress card for a terminal that arrives after final ACK', async () => {
+    const ds = daemonSession();
+    await start(ds);
+    await deliverFinalThroughProgressCard(ds, {
+      type: 'final_output', sessionId: 'session-1', turnId: 'turn-1', dispatchAttempt: 1,
+      content: '答案', lastUuid: 'final-1',
+    }, JSON.stringify({ schema: '2.0' }), eligible, deps);
+    acknowledgeProgressFinal(ds, 'turn-1');
+
+    await handleTurnProgressTerminal(ds, {
+      type: 'turn_terminal', sessionId: 'session-1', turnId: 'turn-1', dispatchAttempt: 1,
+      status: 'completed',
+    }, eligible, deps);
+
+    expect(mocks.create).toHaveBeenCalledOnce();
+    expect(ds.session.turnProgressBinding).toBeUndefined();
   });
 
   it('falls back only for a permanent update failure', async () => {

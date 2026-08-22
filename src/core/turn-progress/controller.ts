@@ -166,8 +166,13 @@ function ownsGeneration(ds: DaemonSession, workerGeneration: number): boolean {
     && ds.session.workerGeneration === workerGeneration;
 }
 
-function hostDeps(ds: DaemonSession, deps: TurnProgressControllerDeps) {
+function hostDeps(
+  ds: DaemonSession,
+  workerGeneration: number,
+  deps: TurnProgressControllerDeps,
+) {
   return {
+    active: () => ownsGeneration(ds, workerGeneration),
     create: async (cardJson: string) => {
       const { createCardEntity } = await import('../../im/lark/client.js');
       return createCardEntity(ds.larkAppId, cardJson);
@@ -260,7 +265,7 @@ async function ensureHost(
         true,
       ),
       binding,
-      hostDeps(ds, deps),
+      hostDeps(ds, binding.workerGeneration, deps),
     );
     ds.turnProgressHost = host;
     return { kind: 'ready', host };
@@ -291,7 +296,7 @@ async function ensureHost(
       loaded.pluginId,
       loaded.plugin,
       contextFor(ds, turnId, dispatchAttempt, workerGeneration, false),
-      hostDeps(ds, deps),
+      hostDeps(ds, workerGeneration, deps),
     ),
   };
   if (!currentStart) {
@@ -427,8 +432,15 @@ export async function handleTurnProgressTerminal(
   deps: TurnProgressControllerDeps,
 ): Promise<void> {
   const workerGeneration = ds.workerGeneration;
-  await new Promise<void>(resolve => setImmediate(resolve));
+  // final_output is queued before terminal, but its existing delivery path
+  // starts on a zero-delay timer. Join the next timers phase so that older
+  // final timer can claim the host first; setImmediate would run before it
+  // when both IPC messages land in the same poll phase.
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
   if (terminal.sessionId !== ds.session.sessionId || workerGeneration === undefined) return;
+  // A terminal is a close edge, never a create edge. Codex App emits it only
+  // after durable final ACK, at which point the binding is already gone.
+  if (!ds.turnProgressHost && !bindingOwns(ds, terminal.turnId)) return;
   const ensured = await ensureHost(
     ds,
     terminal.turnId,
@@ -446,11 +458,12 @@ export async function handleTurnProgressTerminal(
   const errorCode = terminal.errorCode && /^[A-Za-z0-9_.:-]{1,80}$/.test(terminal.errorCode)
     ? terminal.errorCode
     : undefined;
-  ensured.host.dispatch({
+  const delivery = await ensured.host.settleTerminal({
     kind: 'terminal',
     status: terminal.status,
     ...(errorCode ? { errorCode } : {}),
-  }, true);
+  });
+  if (delivery.kind === 'delivered') acknowledgeProgressFinal(ds, terminal.turnId);
 }
 
 export async function deliverFinalThroughProgressCard(
