@@ -21890,8 +21890,9 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     // Required-scope check: 启动后 best-effort 校验
     // im:message.group_at_msg.include_bot:readonly。缺失会 logger.error +
     // 私信 allowedUsers[0]。校验异步，跑失败不影响 daemon。
-    // apiOnly 无飞书连接 → 无 scope 概念，跳过。
-    if (!cfg.apiOnly) {
+    // apiOnly 无飞书连接 → 无 scope 概念，跳过。显式选择人工管理权限时也跳过，
+    // 避免启动自检通过开放平台会话把管理员主动撤回的权限重新加回。
+    if (!cfg.apiOnly && process.env.BOTMUX_MANUAL_SCOPE_MANAGEMENT !== '1') {
       checkRequiredScopes(cfg.larkAppId).catch(err => {
         logger.debug(`[${cfg.larkAppId}] required-scope check failed: ${err?.message ?? err}`);
       });

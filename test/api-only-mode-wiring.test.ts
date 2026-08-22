@@ -41,9 +41,16 @@ describe('API-only bot mode — boot-time Feishu decoupling (source lock)', () =
 
   it('gates the required-scope check behind !cfg.apiOnly', () => {
     const block = region(daemonSource, 'Required-scope check: 启动后 best-effort 校验', '主动开工 — 场景①');
-    expect(block).toContain('if (!cfg.apiOnly) {');
+    expect(block).toContain('if (!cfg.apiOnly &&');
     expect(block).toContain('checkRequiredScopes(cfg.larkAppId)');
-    expect(block.indexOf('if (!cfg.apiOnly) {'))
+    expect(block.indexOf('if (!cfg.apiOnly &&'))
+      .toBeLessThan(block.indexOf('checkRequiredScopes(cfg.larkAppId)'));
+  });
+
+  it('does not inspect or auto-modify scopes in manual scope-management mode', () => {
+    const block = region(daemonSource, 'Required-scope check: 启动后 best-effort 校验', '主动开工 — 场景①');
+    expect(block).toContain("process.env.BOTMUX_MANUAL_SCOPE_MANAGEMENT !== '1'");
+    expect(block.indexOf("process.env.BOTMUX_MANUAL_SCOPE_MANAGEMENT !== '1'"))
       .toBeLessThan(block.indexOf('checkRequiredScopes(cfg.larkAppId)'));
   });
 
