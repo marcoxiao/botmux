@@ -57,6 +57,11 @@ export interface ResolvedDashboardSettingsView {
     notifyWhen: 'locked_only' | 'always';
     platformSupported: boolean;
     hookInstalled: boolean;
+    hookHealth?: {
+      status: 'trusted' | 'untrusted' | 'disabled' | 'missing' | 'unavailable';
+      checkedAt: string;
+      error?: string;
+    };
     botOptions?: Array<{
       larkAppId: string;
       botName: string | null;

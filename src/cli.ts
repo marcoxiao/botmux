@@ -14216,15 +14216,18 @@ switch (command) {
       isCodexNotifierHookInstalled,
       isCodexNotifierWorkerStateFresh,
       listCodexNotifierOutbox,
+      probeCodexNotifierHookHealth,
       readCodexNotifierWorkerState,
       resolveCodexNotifierConfig,
     } = await import('./features/codex-notifier/index.js');
     const dataDir = resolveDataDir();
     const resolved = resolveCodexNotifierConfig();
     const worker = readCodexNotifierWorkerState(dataDir);
+    const hookHealth = await probeCodexNotifierHookHealth();
     console.log(JSON.stringify({
       ...resolved,
       hookInstalled: isCodexNotifierHookInstalled(),
+      hookHealth,
       pendingCount: listCodexNotifierOutbox(dataDir).length,
       targetDaemonOnline: resolved.targetBotAppId
         ? findDaemon(resolved.targetBotAppId) !== null

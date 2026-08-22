@@ -102,6 +102,21 @@ export interface ListCodexAppThreadsOptions {
   initializeTimeoutMs?: number;
 }
 
+export interface ListCodexAppHooksOptions {
+  codexBin?: string;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+  initializeTimeoutMs?: number;
+}
+
+export interface CodexAppHook {
+  eventName: string;
+  command?: string;
+  enabled: boolean;
+  trustStatus?: string;
+}
+
 export interface SetCodexAppThreadNameOptions {
   threadId: string;
   name: string;
@@ -689,6 +704,37 @@ export async function listCodexAppThreads(opts: ListCodexAppThreadsOptions = {})
     const rows: JsonObject[] = Array.isArray(result?.data) ? result.data : [];
     const normalized: Array<CodexAppThreadSummary | null> = rows.map((row: JsonObject) => normalizeThread(row));
     return normalized.filter((thread): thread is CodexAppThreadSummary => !!thread);
+  } finally {
+    client.close();
+  }
+}
+
+/** 读取 Codex 实际生效的 Hook 与信任状态，不解析或修改私有配置文件。 */
+export async function listCodexAppHooks(
+  opts: ListCodexAppHooksOptions = {},
+): Promise<CodexAppHook[]> {
+  const timeoutMs = opts.timeoutMs ?? 7_000;
+  const codexBin = resolveCommand(opts.codexBin ?? 'codex');
+  const cwd = opts.cwd ?? process.cwd();
+  const client = new CodexAppServerProbe(codexBin, cwd, opts.env);
+  try {
+    await client.initialize(opts.initializeTimeoutMs ?? timeoutMs);
+    const result = await client.withTimeout(
+      client.request('hooks/list', { cwds: [cwd] }),
+      timeoutMs,
+      'hooks/list',
+    );
+    const groups: JsonObject[] = Array.isArray(result?.data) ? result.data : [];
+    return groups.flatMap(group => Array.isArray(group?.hooks) ? group.hooks : [])
+      .flatMap((raw: JsonObject): CodexAppHook[] => {
+        if (!raw || typeof raw !== 'object' || typeof raw.eventName !== 'string') return [];
+        return [{
+          eventName: raw.eventName,
+          ...(typeof raw.command === 'string' ? { command: raw.command } : {}),
+          enabled: raw.enabled === true,
+          ...(typeof raw.trustStatus === 'string' ? { trustStatus: raw.trustStatus } : {}),
+        }];
+      });
   } finally {
     client.close();
   }

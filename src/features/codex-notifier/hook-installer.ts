@@ -40,7 +40,7 @@ function botmuxShimFromCommand(value: unknown): string | undefined {
   return match?.[1] ?? match?.[2] ?? match?.[3];
 }
 
-function isBotmuxCodexNotifierCommand(value: unknown): boolean {
+export function isBotmuxCodexNotifierCommand(value: unknown): boolean {
   return botmuxShimFromCommand(value) !== undefined;
 }
 

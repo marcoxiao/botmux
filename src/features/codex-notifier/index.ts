@@ -66,8 +66,15 @@ export {
   botmuxCodexNotifierHookCommand,
   codexHooksPath,
   installCodexNotifierHook,
+  isBotmuxCodexNotifierCommand,
   isCodexNotifierHookInstalled,
 } from './hook-installer.js';
+export {
+  probeCodexNotifierHookHealth,
+  type CodexNotifierHookHealth,
+  type CodexNotifierHookHealthStatus,
+  type ProbeCodexNotifierHookHealthOptions,
+} from './hook-health.js';
 export {
   processCodexNotifierHookPayload,
   runCodexNotifierHookCli,

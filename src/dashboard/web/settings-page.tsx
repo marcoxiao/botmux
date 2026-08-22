@@ -33,6 +33,11 @@ interface DashboardSettings {
     notifyWhen: 'locked_only' | 'always';
     platformSupported: boolean;
     hookInstalled: boolean;
+    hookHealth: {
+      status: 'trusted' | 'untrusted' | 'disabled' | 'missing' | 'unavailable';
+      checkedAt: string;
+      error?: string;
+    };
     botOptions: Array<{
       larkAppId: string;
       botName: string | null;
@@ -189,6 +194,15 @@ function parseSettings(s: any): DashboardSettings {
       notifyWhen: s?.codexNotifier?.notifyWhen === 'always' ? 'always' : 'locked_only',
       platformSupported: s?.codexNotifier?.platformSupported === true,
       hookInstalled: s?.codexNotifier?.hookInstalled === true,
+      hookHealth: {
+        status: ['trusted', 'untrusted', 'disabled', 'missing', 'unavailable']
+          .includes(s?.codexNotifier?.hookHealth?.status)
+          ? s.codexNotifier.hookHealth.status
+          : 'unavailable',
+        checkedAt: typeof s?.codexNotifier?.hookHealth?.checkedAt === 'string'
+          ? s.codexNotifier.hookHealth.checkedAt
+          : '',
+      },
       botOptions: Array.isArray(s?.codexNotifier?.botOptions) ? s.codexNotifier.botOptions : [],
       targetDaemonOnline: s?.codexNotifier?.targetDaemonOnline === true,
       pendingCount: Number.isSafeInteger(s?.codexNotifier?.pendingCount)
@@ -1282,6 +1296,14 @@ export function CodexNotifierSettingsEditor(props: {
           ) : props.value.enabled ? (
             !props.value.hookInstalled ? (
               <p className="hint-warn-inline">{tr('settings.codexNotifierHookPending')}</p>
+            ) : props.value.hookHealth.status === 'untrusted' ? (
+              <p className="hint-warn-inline">{tr('settings.codexNotifierHookUntrusted')}</p>
+            ) : props.value.hookHealth.status === 'disabled' ? (
+              <p className="hint-warn-inline">{tr('settings.codexNotifierHookDisabled')}</p>
+            ) : props.value.hookHealth.status === 'missing' ? (
+              <p className="hint-warn-inline">{tr('settings.codexNotifierHookMissing')}</p>
+            ) : props.value.hookHealth.status === 'unavailable' ? (
+              <p className="hint-warn-inline">{tr('settings.codexNotifierHookUnavailable')}</p>
             ) : !props.value.workerOnline ? (
               <p className="hint-warn-inline">{tr('settings.codexNotifierWorkerPending')}</p>
             ) : props.value.lastError ? (

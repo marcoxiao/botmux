@@ -14,6 +14,10 @@ function configuredValue(overrides: Partial<EditorValue> = {}): EditorValue {
     notifyWhen: 'always',
     platformSupported: true,
     hookInstalled: true,
+    hookHealth: {
+      status: 'trusted',
+      checkedAt: '2026-08-23T00:00:00.000Z',
+    },
     botOptions: [{
       larkAppId: 'cli_target',
       botName: 'Codex 助理',
@@ -143,6 +147,49 @@ describe('CodexNotifierSettingsEditor', () => {
     });
 
     expect(JSON.stringify(renderer.toJSON())).toContain('Hook 尚未就绪');
+  });
+
+  it('distinguishes native Hook trust, disabled, and probe failures', () => {
+    const { renderer } = renderEditor(configuredValue({
+      enabled: true,
+      hookHealth: {
+        status: 'untrusted',
+        checkedAt: '2026-08-23T00:00:00.000Z',
+      },
+    }));
+    expect(JSON.stringify(renderer.toJSON())).toContain('Codex 尚未信任 BotMux Hook');
+
+    act(() => {
+      renderer.update(React.createElement(CodexNotifierSettingsEditor, {
+        value: configuredValue({
+          enabled: true,
+          hookHealth: {
+            status: 'disabled',
+            checkedAt: '2026-08-23T00:00:00.000Z',
+          },
+        }),
+        disabled: false,
+        saving: false,
+        onSave: vi.fn(async () => undefined),
+      }));
+    });
+    expect(JSON.stringify(renderer.toJSON())).toContain('BotMux Hook 已被 Codex 禁用');
+
+    act(() => {
+      renderer.update(React.createElement(CodexNotifierSettingsEditor, {
+        value: configuredValue({
+          enabled: true,
+          hookHealth: {
+            status: 'unavailable',
+            checkedAt: '2026-08-23T00:00:00.000Z',
+          },
+        }),
+        disabled: false,
+        saving: false,
+        onSave: vi.fn(async () => undefined),
+      }));
+    });
+    expect(JSON.stringify(renderer.toJSON())).toContain('暂时无法读取 Codex Hook 状态');
   });
 
   it('shows the offline reason before recipient verification while enabling', () => {

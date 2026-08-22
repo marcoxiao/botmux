@@ -434,6 +434,11 @@ function handle(request) {
     respond(request.id, { userAgent: 'fake-codex-app-server' });
     return;
   }
+  if (request.method === 'hooks/list') {
+    const hooks = JSON.parse(process.env.FAKE_CODEX_HOOKS_JSON ?? '[]');
+    respond(request.id, { data: [{ cwd: process.cwd(), hooks }] });
+    return;
+  }
   if (request.method === 'thread/start') {
     respond(request.id, { thread: { id: 'thread-fake' } });
     return;

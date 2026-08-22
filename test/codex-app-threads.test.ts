@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   generateCodexAppThreadTitle,
+  listCodexAppHooks,
   setCodexAppThreadName,
 } from '../src/services/codex-app-threads.js';
 
@@ -197,6 +198,29 @@ describe('generateCodexAppThreadTitle', () => {
       }
     }
     throw new Error(`title generator fake Codex app-server ${pid} was not reaped`);
+  });
+});
+
+describe('listCodexAppHooks', () => {
+  it('reads the effective Hook state through the native app-server API', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-hooks-list-'));
+    tempDirs.push(dir);
+    const hooks = [{
+      eventName: 'stop',
+      command: '/tmp/.botmux/bin/botmux codex-watch-hook',
+      enabled: true,
+      trustStatus: 'trusted',
+    }];
+
+    await expect(listCodexAppHooks({
+      codexBin: FAKE_CODEX,
+      cwd: dir,
+      env: {
+        ...process.env,
+        FAKE_CODEX_HOOKS_JSON: JSON.stringify(hooks),
+      },
+      timeoutMs: 5_000,
+    })).resolves.toEqual(hooks);
   });
 });
 

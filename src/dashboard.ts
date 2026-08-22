@@ -92,6 +92,7 @@ import {
 import { handleWebhookRoute } from './dashboard/webhook-routes.js';
 import { handleFeedbackAnalyticsApi } from './dashboard/feedback-analytics-api.js';
 import { FeedbackAnalyticsService } from './services/feedback-analytics.js';
+import { listCodexAppHooks } from './services/codex-app-threads.js';
 import { handleFederationApi } from './dashboard/federation-api.js';
 import { buildFederatedRoster } from './services/federation-roster.js';
 import { resolveLiveBotTransport } from './services/team-roster.js';
@@ -257,10 +258,12 @@ import {
   isCodexNotifierWorkerStateFresh,
   isCodexNotifierHookInstalled,
   listCodexNotifierOutbox,
+  probeCodexNotifierHookHealth,
   readCodexNotifierWorkerState,
   resolveCodexNotifierConfig,
   runCodexSideConversationMonitor,
   runCodexNotifierWorkerSupervisor,
+  type CodexNotifierHookHealth,
 } from './features/codex-notifier/index.js';
 import type { BotSkillPolicy, SkillPack, SkillPackage, SkillSelector } from './core/skills/types.js';
 import { discoverNativeCliSkillGroups } from './core/skills/discovery.js';
@@ -853,6 +856,7 @@ interface ResolvedDashboardSettings {
     notifyWhen: 'locked_only' | 'always';
     platformSupported: boolean;
     hookInstalled: boolean;
+    hookHealth: CodexNotifierHookHealth;
     botOptions: Array<{
       larkAppId: string;
       botName: string | null;
@@ -1462,6 +1466,31 @@ async function syncVcMeetingListenerBotConfig(listenerBotAppId: string | null, p
   return { ok: true };
 }
 
+const CODEX_HOOK_HEALTH_CACHE_MS = 30_000;
+let cachedCodexHookHealth: CodexNotifierHookHealth = {
+  status: 'unavailable',
+  checkedAt: '',
+};
+let codexHookHealthCheckedAtMs = 0;
+let codexHookHealthRefresh: Promise<CodexNotifierHookHealth> | undefined;
+
+async function refreshCodexHookHealth(force = false): Promise<CodexNotifierHookHealth> {
+  if (!force && Date.now() - codexHookHealthCheckedAtMs < CODEX_HOOK_HEALTH_CACHE_MS) {
+    return cachedCodexHookHealth;
+  }
+  if (codexHookHealthRefresh) return codexHookHealthRefresh;
+  codexHookHealthRefresh = probeCodexNotifierHookHealth({
+    listHooks: () => listCodexAppHooks({ timeoutMs: 3_000 }),
+  })
+    .then(health => {
+      cachedCodexHookHealth = health;
+      codexHookHealthCheckedAtMs = Date.now();
+      return health;
+    })
+    .finally(() => { codexHookHealthRefresh = undefined; });
+  return codexHookHealthRefresh;
+}
+
 function resolveDashboardSettings(): ResolvedDashboardSettings {
   const global = readGlobalConfig();
   const dashboard = global.dashboard ?? {};
@@ -1492,6 +1521,7 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
       notifyWhen: codexNotifier.notifyWhen,
       platformSupported: process.platform === 'darwin',
       hookInstalled: isCodexNotifierHookInstalled(),
+      hookHealth: cachedCodexHookHealth,
       botOptions: codexNotifierBots,
       targetDaemonOnline: !!codexNotifier.targetBotAppId
         && registry.list().some(bot => bot.larkAppId === codexNotifier.targetBotAppId),
@@ -3922,6 +3952,7 @@ const server = createServer(async (req, res) => {
       return jsonRes(res, 200, { schedules, timezone: scheduleTimeZone() });
     }
     if (req.method === 'GET' && url.pathname === '/api/settings') {
+      if (authed) await refreshCodexHookHealth();
       const dashboardSettings = resolveDashboardSettings();
       // `authed` lets the Settings page disable toggles for read-only
       // visitors up front, instead of letting them flip a switch that
@@ -3960,9 +3991,16 @@ const server = createServer(async (req, res) => {
         typeof parsed === 'object' && parsed !== null && 'herdrTraexPlugin' in parsed,
         result.settings.herdrTraexPlugin,
       );
+      const touchedCodexNotifier = !!parsed
+        && typeof parsed === 'object'
+        && 'codexNotifier' in parsed;
+      if (touchedCodexNotifier) await refreshCodexHookHealth(true);
+      const responseSettings = touchedCodexNotifier
+        ? resolveDashboardSettings()
+        : result.settings;
       return jsonRes(res, 200, herdrTraexInstall
-        ? { ok: true, settings: result.settings, herdrTraexInstall }
-        : { ok: true, settings: result.settings });
+        ? { ok: true, settings: responseSettings, herdrTraexInstall }
+        : { ok: true, settings: responseSettings });
     }
 
     if (req.method === 'GET' && url.pathname === '/api/autostart') {
