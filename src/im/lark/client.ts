@@ -185,6 +185,17 @@ export class MessageWithdrawnError extends Error {
   }
 }
 
+export class LarkCardKitError extends Error {
+  constructor(
+    message: string,
+    readonly disposition: 'retryable' | 'ambiguous' | 'permanent',
+    readonly code?: number,
+  ) {
+    super(message);
+    this.name = 'LarkCardKitError';
+  }
+}
+
 /**
  * Re-exported from bot-registry (defined there to avoid an import cycle with
  * getBotClient). apiOnly bots throw this on any Feishu client request.
@@ -228,6 +239,21 @@ export class UserTokenMissingError extends Error {
 /** Extract Lark error code from AxiosError or SDK error. */
 function getLarkErrorCode(err: any): number | undefined {
   return err?.response?.data?.code ?? err?.code;
+}
+
+function classifyCardKitError(operation: string, error: unknown): LarkCardKitError {
+  if (error instanceof LarkCardKitError) return error;
+  const err = error as any;
+  const status = err?.response?.status ?? err?.response?.statusCode ?? err?.status ?? err?.statusCode;
+  const businessCode = err?.response?.data?.code ?? (typeof err?.code === 'number' ? err.code : undefined);
+  const code = typeof status === 'number' ? status : businessCode;
+  const disposition = status === 429 || typeof status === 'number' && status >= 500
+    ? 'retryable'
+    : typeof status === 'number' || typeof businessCode === 'number'
+      ? 'permanent'
+      : 'ambiguous';
+  const detail = err?.response?.data?.msg ?? err?.message ?? String(error);
+  return new LarkCardKitError(`${operation} failed: ${detail}`, disposition, code);
 }
 
 const LARK_CODE_MESSAGE_WITHDRAWN = 230011;
@@ -997,6 +1023,60 @@ export async function updateMessage(larkAppId: string, messageId: string, cardJs
   if (res.code !== 0) {
     if (res.code === LARK_CODE_MESSAGE_WITHDRAWN) throw new MessageWithdrawnError(messageId);
     throw new Error(`Failed to update message: ${res.msg} (code: ${res.code})`);
+  }
+}
+
+export async function createCardEntity(larkAppId: string, cardJson: string): Promise<string> {
+  assertLarkTransport(larkAppId, 'createCardEntity');
+  const c = getBotClient(larkAppId);
+  try {
+    const res: any = await (c as any).cardkit.v1.card.create({
+      data: { type: 'card_json', data: stampBotmuxCallbackMarkers(cardJson) },
+    });
+    if (res?.code !== 0) {
+      throw new LarkCardKitError(
+        `createCardEntity failed: ${res?.msg ?? 'invalid response'}`,
+        'permanent',
+        typeof res?.code === 'number' ? res.code : undefined,
+      );
+    }
+    const cardId = res.data?.card_id;
+    if (typeof cardId !== 'string' || !cardId) {
+      throw new LarkCardKitError('createCardEntity failed: card_id missing', 'permanent');
+    }
+    return cardId;
+  } catch (error) {
+    throw classifyCardKitError('createCardEntity', error);
+  }
+}
+
+export async function updateCardEntity(
+  larkAppId: string,
+  cardId: string,
+  cardJson: string,
+  sequence: number,
+  uuid: string,
+): Promise<void> {
+  assertLarkTransport(larkAppId, 'updateCardEntity');
+  const c = getBotClient(larkAppId);
+  try {
+    const res: any = await (c as any).cardkit.v1.card.update({
+      path: { card_id: cardId },
+      data: {
+        card: { type: 'card_json', data: stampBotmuxCallbackMarkers(cardJson) },
+        sequence,
+        uuid,
+      },
+    });
+    if (res?.code !== 0) {
+      throw new LarkCardKitError(
+        `updateCardEntity failed: ${res?.msg ?? 'invalid response'}`,
+        'permanent',
+        typeof res?.code === 'number' ? res.code : undefined,
+      );
+    }
+  } catch (error) {
+    throw classifyCardKitError('updateCardEntity', error);
   }
 }
 
