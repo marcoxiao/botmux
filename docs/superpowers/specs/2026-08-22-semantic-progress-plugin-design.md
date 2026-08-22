@@ -170,7 +170,7 @@ Core 交给插件的 `TurnProgressEventV1` 由 `TurnProgressFactV1` 与现有事
 - `turn_progress` IPC 提供 started、narrative、operation；
 - `tui_prompt` / `tui_prompt_resolved` 提供 waiting/resumed；
 - `steer_accepted` 不进入 reducer，只把该补充消息的 turn ID 绑定为当前执行单元的成员别名；
-- `turn_terminal` 提供 completed/failed/cancelled/ambiguous 终态；当本轮没有可交付的 `final_output` 时，它负责把卡片冻结为对应终态；
+- `turn_terminal` 提供 completed/failed/cancelled/ambiguous 生命周期证据；failed/cancelled/ambiguous 在没有已开始的 final intent 时可冻结对应终态，completed 只有带 `outputDisposition = nothing_to_send` 或已有 `explicit_reply_observed` 时才证明“不会再有 canonical final”。裸 completed 可能只是 transcript hydration 先到，不能抢先清 binding；
 - `final_output` 提供 canonical final delivery，不重新包装一份 terminal IPC。
 
 因此 Worker 不重复发送 waiting 或 terminal，插件协议也不要求 provider reader 复制已有生命周期。
@@ -219,7 +219,7 @@ Binding 作为 Session 的一个可选字段保存，不新建 sidecar store。�
 3. 现有 `tui_prompt` / `tui_prompt_resolved` 分支向同一 reducer 投递 waiting/resumed；
 4. 普通飞书 IM `final_output` 构建 canonical final card 后，请求 host 在原 card entity 完成交付；
 5. 明确成功后才沿用现有 dedupe、feedback persistence、turn settlement 与 `✅` reaction；明确永久失败才走现有 stable-UUID fresh-message 路径；
-6. `turn_terminal` 没有 canonical final 时，只把 active 卡冻结为完成、失败、取消或不明确终态；已有 `explicit_reply_observed` 时显示“答复已通过独立消息发送”，不改写显式消息；
+6. `turn_terminal` 没有 canonical final 时，把 active 卡冻结为失败、取消或不明确终态；completed 仅在有 `nothing_to_send` 正证据时冻结为完成，已有 `explicit_reply_observed` 时显示“答复已通过独立消息发送”；裸 completed 保持“正在确认结果”，等待 final/recovery；
 7. 被插件接管后不再创建或 patch 旧 streaming card；CardKit entity 创建明确失败时，本轮立即退回现有 `postTurnStartingCard`/最终答复链路，避免双卡或悬空卡。
 
 统一的基础资格判断必须同时用于 start、progress 和 final：插件已在当前 session manifest 启用、普通飞书 IM、非 HTTP wait/async、非 doc comment、非 VC receiver/listener、非 substitute、非 managed/silent turn。Final 接管还要求不是 `suppressDelivery` 或 `steer_superseded`；前者由 `explicit_reply_observed`/terminal 将进度卡安全收口，后者继续等待同一 ordered-steer 执行单元的真实 final。特殊通道完全沿用旧链路。
@@ -291,12 +291,12 @@ Codex App ordered steer 不创建第二张卡：现有 `steer_accepted` 将补�
 
 1. Core 按现有逻辑构建 canonical final card；
 2. Core 将该卡和权威 turn 身份交给 turn-progress host；
-3. Host 使用稳定 update UUID 与下一个 sequence 将原 card entity 全量更新为最终内容；
-4. 明确成功后返回现有 message ID；
-5. Core 才记录 feedback delivery、提交 Codex App settlement/bridge dedupe，并给原用户消息添加 `✅`；
+3. Host 使用稳定 update UUID 与下一个 sequence 将原 card entity 全量更新为最终内容，并把 binding 保持为 `finalizing`；
+4. 明确成功后返回现有 message ID，但此时不能抢先清 binding；
+5. Core 记录 feedback delivery、提交 Codex App settlement/bridge dedupe，并给原用户消息添加 `✅`；这些既有权威步骤确认后才 ACK host 清除 active binding；
 6. 若 CardKit 明确返回永久失败，则 Core 使用现有稳定 UUID 的 fresh-message 路径交付最终答案。
 
-初始交付分为 CardKit entity create 与现有 IM reply 两步：Core 在 reply 前先持久化 `cardId` 与稳定 IM UUID。Reply 结果不明确时只用同一 UUID 重试，不能重新 create entity；明确永久失败则放弃未挂载 entity 并回到现有开始卡/最终答复链路。这样即使网络在两步之间中断，也不会向用户发送两张进度卡。
+初始交付分为 CardKit entity create 与现有 IM reply 两步：Core 在 reply 前先持久化 `cardId` 与稳定 IM UUID。Create 响应不明确且拿不到 `cardId` 时不重试 create；该 entity 即使已在服务端产生也尚未挂到消息上，可以安全退回旧开始卡。Reply 结果不明确时只用同一 UUID 重试，不能重新 create entity；明确永久失败则放弃未挂载 entity 并回到现有开始卡/最终答复链路。这样即使网络在两步之间中断，也不会向用户发送两张进度卡。
 
 遇到“服务端可能已接受、客户端未收到响应”时，Host 不立即 fresh-message fallback，而是保留同一 update intent，并用相同 `uuid + sequence` 重试原卡。只有明确永久失败才切换交付介质；这是在 CardKit 没有 card-content read 的前提下同时避免丢失与重复的必要约束。进程内重试保留 canonical card JSON；Daemon 重启后不从 hash 反推内容，而是依赖现有 `final_output` settlement/transcript replay 重新构建同一 canonical card，并复用已持久化的 intent 身份。
 
