@@ -1,4 +1,5 @@
 import {
+  LarkMessageError,
   MessageWithdrawnError,
   replyMessage as larkReplyMessage,
   sendMessage as larkSendMessage,
@@ -105,9 +106,13 @@ export class CodexNotifierDeliveryCoordinator {
     if (!route) {
       let messageId: string;
       try {
-        messageId = await this.sendGroup(chatId, card, uuid);
-      } catch {
-        return this.deliverFallbackDm(event, requestOptions);
+        messageId = await this.sendGroup(chatId, card, uuid, requestOptions);
+      } catch (error) {
+        if (error instanceof MessageWithdrawnError
+          || error instanceof LarkMessageError && error.disposition === 'permanent') {
+          return this.deliverFallbackDm(event, requestOptions);
+        }
+        throw error;
       }
       // 远端发送成功但本地持久化失败时必须抛出，让 outbox 用同一 UUID 重试；
       // 不能把事件标成已投递，否则会永久留下无路由的孤儿根卡。
@@ -124,13 +129,18 @@ export class CodexNotifierDeliveryCoordinator {
         route.rootMessageId,
         card,
         uuid,
+        requestOptions,
       );
       return { destination: 'group', messageId };
     } catch (error) {
       if (error instanceof MessageWithdrawnError) {
         this.options.routeStore.invalidate(event.threadId, chatId);
+        return this.deliverFallbackDm(event, requestOptions);
       }
-      return this.deliverFallbackDm(event, requestOptions);
+      if (error instanceof LarkMessageError && error.disposition === 'permanent') {
+        return this.deliverFallbackDm(event, requestOptions);
+      }
+      throw error;
     }
   }
 
@@ -158,23 +168,46 @@ export class CodexNotifierDeliveryCoordinator {
     chatId: string,
     card: string,
     uuid: string,
+    requestOptions?: LarkRequestOptions,
   ): Promise<string> {
-    return this.sendMessage(this.options.larkAppId, chatId, card, 'interactive', uuid);
+    return requestOptions
+      ? this.sendMessage(
+        this.options.larkAppId,
+        chatId,
+        card,
+        'interactive',
+        uuid,
+        undefined,
+        requestOptions,
+      )
+      : this.sendMessage(this.options.larkAppId, chatId, card, 'interactive', uuid);
   }
 
   private replyGroup(
     rootMessageId: string,
     card: string,
     uuid: string,
+    requestOptions?: LarkRequestOptions,
   ): Promise<string> {
-    return this.replyMessage(
-      this.options.larkAppId,
-      rootMessageId,
-      card,
-      'interactive',
-      true,
-      uuid,
-    );
+    return requestOptions
+      ? this.replyMessage(
+        this.options.larkAppId,
+        rootMessageId,
+        card,
+        'interactive',
+        true,
+        uuid,
+        undefined,
+        requestOptions,
+      )
+      : this.replyMessage(
+        this.options.larkAppId,
+        rootMessageId,
+        card,
+        'interactive',
+        true,
+        uuid,
+      );
   }
 
   private sendOwner(

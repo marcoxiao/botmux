@@ -169,7 +169,7 @@ describe('Codex notifier group topic adoption', () => {
       chatType: 'group',
       scope: 'thread',
     });
-    expect(JSON.stringify(card)).toContain('已连接');
+    expect(JSON.stringify(card)).toContain('已绑定 Codex App 任务');
   });
 
   it('fails closed when a group card has no matching route', async () => {

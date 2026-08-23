@@ -16,7 +16,11 @@ export interface JsonlCursor {
 export interface JsonlScanOptions {
   endOffset?: number;
   chunkSize?: number;
+  /** Skip a pathological logical line after this many bytes while continuing
+   *  at the next newline. Omit to preserve the legacy unbounded-line behavior. */
+  maxLineBytes?: number;
   onLine?: (line: string, lineStart: number) => void;
+  onOversizedLine?: (lineStart: number) => void;
   onError?: (error: unknown) => void;
 }
 
@@ -26,10 +30,14 @@ const JSONL_SCAN_CHUNK_BYTES = 64 * 1024;
 function scanJsonlFromOpenFd(fd: number, fromOffset: number, opts: JsonlScanOptions = {}): JsonlCursor | null {
   const endOffset = opts.endOffset;
   const chunkSize = Math.max(1, opts.chunkSize ?? JSONL_SCAN_CHUNK_BYTES);
+  const maxLineBytes = opts.maxLineBytes === undefined
+    ? Number.POSITIVE_INFINITY
+    : Math.max(1, opts.maxLineBytes);
   let nextReadOffset = Math.max(0, fromOffset);
   let lineStartOffset = nextReadOffset;
   let lineBuffers: Buffer[] = [];
   let lineBytes = 0;
+  let lineOversized = false;
   const buf = Buffer.alloc(chunkSize);
 
   try {
@@ -44,31 +52,44 @@ function scanJsonlFromOpenFd(fd: number, fromOffset: number, opts: JsonlScanOpti
       let searchFrom = 0;
       let nl = buf.subarray(0, bytesRead).indexOf(0x0a);
       while (nl >= 0) {
-        const segment = Buffer.from(buf.subarray(searchFrom, nl));
-        if (segment.length > 0) {
-          lineBuffers.push(segment);
-          lineBytes += segment.length;
+        const segment = buf.subarray(searchFrom, nl);
+        lineBytes += segment.length;
+        if (!lineOversized && lineBytes <= maxLineBytes && segment.length > 0) {
+          lineBuffers.push(Buffer.from(segment));
+        } else if (lineBytes > maxLineBytes) {
+          lineOversized = true;
+          lineBuffers = [];
         }
-        const line = lineBuffers.length === 1
-          ? lineBuffers[0]
-          : Buffer.concat(lineBuffers, lineBytes);
-        opts.onLine?.(line.toString('utf8'), lineStartOffset);
+        if (!lineOversized) {
+          const line = lineBuffers.length === 1
+            ? lineBuffers[0]
+            : Buffer.concat(lineBuffers, lineBytes);
+          opts.onLine?.(line.toString('utf8'), lineStartOffset);
+        } else {
+          opts.onOversizedLine?.(lineStartOffset);
+        }
         searchFrom = nl + 1;
         lineStartOffset += lineBytes + 1;
         lineBuffers = [];
         lineBytes = 0;
+        lineOversized = false;
         nl = buf.subarray(searchFrom, bytesRead).indexOf(0x0a);
         if (nl >= 0) nl += searchFrom;
       }
       if (searchFrom < bytesRead) {
-        const segment = Buffer.from(buf.subarray(searchFrom, bytesRead));
-        lineBuffers.push(segment);
+        const segment = buf.subarray(searchFrom, bytesRead);
         lineBytes += segment.length;
+        if (!lineOversized && lineBytes <= maxLineBytes) {
+          lineBuffers.push(Buffer.from(segment));
+        } else {
+          lineOversized = true;
+          lineBuffers = [];
+        }
       }
     }
     return {
       newOffset: lineStartOffset,
-      pendingTail: lineBuffers.length === 0
+      pendingTail: lineOversized || lineBuffers.length === 0
         ? ''
         : (lineBuffers.length === 1 ? lineBuffers[0] : Buffer.concat(lineBuffers, lineBytes)).toString('utf8'),
     };

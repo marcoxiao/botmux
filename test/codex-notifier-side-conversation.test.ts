@@ -313,6 +313,23 @@ describe('Codex Side Chat state tracking', () => {
     expect(event?.completedAt).toBe('2026-07-24T09:00:00.000Z');
   });
 
+  it('sanitizes Codex UI wrappers from Side Chat notification titles', () => {
+    const state = sideState('completed');
+    const turn = state.turnHistory.history.entitiesByKey[TURN_KEY] as any;
+    turn.params.input = [{
+      type: 'text',
+      text: [
+        '# Files mentioned by the user:',
+        '## image.png: /private/tmp/image.png',
+        '## My request:',
+        '分析这张截图',
+        '<image path="/private/tmp/image.png"></image>',
+      ].join('\n'),
+    }];
+
+    expect(createSideConversationCompletionEvent(state, turn)?.title).toBe('分析这张截图');
+  });
+
   it('evicts old conversations before the tracked state byte budget is exceeded', () => {
     const oneStateBytes = Buffer.byteLength(JSON.stringify(sideState('inProgress')));
     const tracker = new CodexSideConversationTracker(10, oneStateBytes + 100);

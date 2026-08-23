@@ -293,7 +293,9 @@ describe('P2#2 · adoptCodexNotifierEvent transfer guard (integration)', () => {
     const ctrl = new AbortController();
     const card = await adoptEvent('cli_app', EVENT, 'om_card', 'ou_owner', ctrl.signal, Date.now() + 2200);
     expect(mocks.probeCodexDesktopThread).toHaveBeenCalledWith(THREAD_ID);
-    expect(JSON.stringify(card)).toContain('已连接');
+    expect(JSON.stringify(card)).toContain('已绑定 Codex App 任务');
+    expect(JSON.stringify(card)).toContain('原任务在 Codex App 中保持打开');
+    expect(JSON.stringify(card)).not.toContain('已连接 Codex App 任务');
   });
 
   it('same-thread binding + Desktop owner missing → rejects instead of returning a false green card', async () => {

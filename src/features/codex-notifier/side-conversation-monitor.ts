@@ -12,6 +12,7 @@ import {
   findCodexRolloutBySessionId,
 } from '../../services/codex-transcript.js';
 import { createCodexNotifierCompletionEvent } from './event.js';
+import { normalizeCodexUserPrompt } from './codex-context.js';
 import { CODEX_DESKTOP_IPC_MAX_FRAME_BYTES } from './desktop-ipc-protocol.js';
 import { resolveCodexNotifierConfig, type ResolvedCodexNotifierConfig } from './config.js';
 import { enqueueCodexNotifierEvent } from './outbox.js';
@@ -168,7 +169,7 @@ function turnPrompt(turn: JsonObject): string | undefined {
       .map(item => item.text.trim())
       .filter(Boolean)
       .join('\n\n');
-    if (text) return text;
+    if (text) return normalizeCodexUserPrompt(text);
   }
   for (const item of Array.isArray(turn.items) ? turn.items : []) {
     if (!plainObject(item) || item.type !== 'userMessage' || !Array.isArray(item.content)) continue;
@@ -177,7 +178,7 @@ function turnPrompt(turn: JsonObject): string | undefined {
       .map(part => part.text.trim())
       .filter(Boolean)
       .join('\n\n');
-    if (text) return text;
+    if (text) return normalizeCodexUserPrompt(text);
   }
   return undefined;
 }

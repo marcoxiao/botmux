@@ -21,6 +21,10 @@ export {
   type CodexNotifierTopicRoute,
 } from './topic-route-store.js';
 export { codexNotifierTopicRoutesPath } from './paths.js';
+export {
+  openCodexNotifierStoreWithRecovery,
+  type CodexNotifierStoreRecoveryOptions,
+} from './store-recovery.js';
 export type {
   CodexNotifierDeliveryUpdate,
   RecordCodexNotifierEventResult,
@@ -52,6 +56,7 @@ export {
   type ResolvedCodexNotifierConfig,
 } from './config.js';
 export {
+  normalizeCodexUserPrompt,
   parseCodexTurnContext,
   readCodexTurnContext,
   type CodexTurnContext,

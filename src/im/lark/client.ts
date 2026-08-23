@@ -196,6 +196,18 @@ export class LarkCardKitError extends Error {
   }
 }
 
+/** Stable delivery classification for idempotent IM send/reply retries. */
+export class LarkMessageError extends Error {
+  constructor(
+    message: string,
+    readonly disposition: 'retryable' | 'ambiguous' | 'permanent',
+    readonly code?: number,
+  ) {
+    super(message);
+    this.name = 'LarkMessageError';
+  }
+}
+
 /**
  * Re-exported from bot-registry (defined there to avoid an import cycle with
  * getBotClient). apiOnly bots throw this on any Feishu client request.
@@ -257,6 +269,30 @@ function classifyCardKitError(operation: string, error: unknown): LarkCardKitErr
 }
 
 const LARK_CODE_MESSAGE_WITHDRAWN = 230011;
+const TRANSIENT_LARK_MESSAGE_CODES = new Set([230049, 230020, 99991400]);
+
+function classifyLarkMessageError(operation: string, error: unknown): LarkMessageError {
+  if (error instanceof LarkMessageError) return error;
+  const err = error as any;
+  const status = err?.response?.status ?? err?.response?.statusCode ?? err?.status ?? err?.statusCode;
+  const businessCode = err?.response?.data?.code
+    ?? (typeof err?.code === 'number' ? err.code : undefined);
+  const code = typeof businessCode === 'number'
+    ? businessCode
+    : typeof status === 'number'
+      ? status
+      : undefined;
+  const disposition = typeof businessCode === 'number'
+    && TRANSIENT_LARK_MESSAGE_CODES.has(businessCode)
+    ? 'retryable'
+    : status === 429 || typeof status === 'number' && status >= 500
+      ? 'retryable'
+      : typeof status === 'number' || typeof businessCode === 'number'
+        ? 'permanent'
+        : 'ambiguous';
+  const detail = err?.response?.data?.msg ?? err?.message ?? String(error);
+  return new LarkMessageError(`${operation} failed: ${detail}`, disposition, code);
+}
 // Capability cache for the undocumented `/members/bots` endpoint. It prevents
 // repeated hits while the tenant/gateway cannot serve the API, but per-request
 // business errors (bad chat id, permission denial) must not poison other chats.
@@ -273,7 +309,7 @@ const listBotsApiFailures = new Map<string, { reason: string; expiresAt: number 
  * idempotencyKey here so retries don't re-send.  Existing callers omit
  * the param and get exactly the pre-Step-6 behavior.
  */
-export interface OutboundMessageOptions {
+export interface OutboundMessageOptions extends LarkRequestOptions {
   /** The provider request is reconciling an already-attempted stable UUID.
    * Lark deduplicates the message, but the local outbound hook is a separate
    * side effect and must not be fired twice. */
@@ -320,31 +356,54 @@ export async function sendMessage(
     ? JSON.stringify({ text: content })
     : msgType === 'interactive' ? stampBotmuxCallbackMarkers(content) : content;
 
+  const data = {
+    receive_id: chatId,
+    msg_type: msgType as any,
+    content: body,
+    ...(uuid ? { uuid } : {}),
+  };
+  const deadlineBound = options?.timeoutMs !== undefined || options?.signal !== undefined;
+
   let res: any;
   try {
-    res = await c.im.v1.message.create({
-      params: { receive_id_type: 'chat_id' },
-      data: {
-        receive_id: chatId,
-        msg_type: msgType as any,
-        content: body,
-        ...(uuid ? { uuid } : {}),
-      },
-    });
+    res = deadlineBound
+      ? await c.request({
+        method: 'POST',
+        url: '/open-apis/im/v1/messages',
+        params: { receive_id_type: 'chat_id' },
+        data,
+        ...larkRequestDeadline(options),
+      })
+      : await c.im.v1.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data,
+      });
   } catch (err: any) {
     if (getLarkErrorCode(err) === LARK_CODE_MESSAGE_WITHDRAWN) {
       throw new MessageWithdrawnError(chatId);
     }
+    if (deadlineBound) throw classifyLarkMessageError('sendMessage', err);
     throw err;
   }
 
   if (res.code !== 0) {
     if (res.code === LARK_CODE_MESSAGE_WITHDRAWN) throw new MessageWithdrawnError(chatId);
+    if (deadlineBound) {
+      throw classifyLarkMessageError('sendMessage', {
+        code: res.code,
+        message: `${res.msg} (code: ${res.code})`,
+      });
+    }
     throw new Error(`Failed to send message: ${res.msg} (code: ${res.code})`);
   }
 
   const messageId = res.data?.message_id;
-  if (!messageId) throw new Error('No message_id in response');
+  if (!messageId) {
+    if (deadlineBound) {
+      throw new LarkMessageError('sendMessage failed: no message_id in response', 'ambiguous');
+    }
+    throw new Error('No message_id in response');
+  }
   logger.info(`Sent message ${messageId} to chat ${chatId}`);
   await emitOutboundHookIfAllowed(options, 'outbound.send', {
       ...hookContext,
@@ -381,31 +440,53 @@ export async function replyMessage(
     ? JSON.stringify({ text: content })
     : msgType === 'interactive' ? stampBotmuxCallbackMarkers(content) : content;
 
+  const data = {
+    msg_type: msgType as any,
+    content: body,
+    ...(replyInThread ? { reply_in_thread: true } : {}),
+    ...(uuid ? { uuid } : {}),
+  };
+  const deadlineBound = options?.timeoutMs !== undefined || options?.signal !== undefined;
+
   let res: any;
   try {
-    res = await c.im.v1.message.reply({
-      path: { message_id: messageId },
-      data: {
-        msg_type: msgType as any,
-        content: body,
-        ...(replyInThread ? { reply_in_thread: true } : {}),
-        ...(uuid ? { uuid } : {}),
-      },
-    });
+    res = deadlineBound
+      ? await c.request({
+        method: 'POST',
+        url: `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`,
+        data,
+        ...larkRequestDeadline(options),
+      })
+      : await c.im.v1.message.reply({
+        path: { message_id: messageId },
+        data,
+      });
   } catch (err: any) {
     if (getLarkErrorCode(err) === LARK_CODE_MESSAGE_WITHDRAWN) {
       throw new MessageWithdrawnError(messageId);
     }
+    if (deadlineBound) throw classifyLarkMessageError('replyMessage', err);
     throw err;
   }
 
   if (res.code !== 0) {
     if (res.code === LARK_CODE_MESSAGE_WITHDRAWN) throw new MessageWithdrawnError(messageId);
+    if (deadlineBound) {
+      throw classifyLarkMessageError('replyMessage', {
+        code: res.code,
+        message: `${res.msg} (code: ${res.code})`,
+      });
+    }
     throw new Error(`Failed to reply message: ${res.msg} (code: ${res.code})`);
   }
 
   const replyId = res.data?.message_id;
-  if (!replyId) throw new Error('No message_id in reply response');
+  if (!replyId) {
+    if (deadlineBound) {
+      throw new LarkMessageError('replyMessage failed: no message_id in response', 'ambiguous');
+    }
+    throw new Error('No message_id in reply response');
+  }
   logger.info(`Replied ${replyId} to message ${messageId} [msgType=${msgType}, replyInThread=${replyInThread}]`);
   await emitOutboundHookIfAllowed(options, 'outbound.reply', {
       ...hookContext,

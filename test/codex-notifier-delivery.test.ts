@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MessageWithdrawnError } from '../src/im/lark/client.js';
+import { LarkMessageError, MessageWithdrawnError } from '../src/im/lark/client.js';
 import {
   CodexNotifierDeliveryCoordinator,
   CodexNotifierTopicRouteStore,
@@ -198,7 +198,7 @@ describe('Codex notifier delivery coordinator', () => {
     await Promise.all(deliveries);
   });
 
-  it('falls back to an alert-only DM and keeps the route on unknown reply errors', async () => {
+  it('keeps ambiguous reply errors retryable on the original topic', async () => {
     const { coordinator, routeStore, replyMessage, sendUserMessage } = createHarness();
     const completion = event('fallback');
     routeStore.bind({
@@ -208,6 +208,21 @@ describe('Codex notifier delivery coordinator', () => {
     });
     replyMessage.mockRejectedValueOnce(new Error('timeout'));
 
+    await expect(coordinator.deliver(completion, 'oc_workbench')).rejects.toThrow('timeout');
+    expect(routeStore.get(completion.threadId, 'oc_workbench')).toBeDefined();
+    expect(sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('falls back to an alert-only DM on a definite permanent reply rejection', async () => {
+    const { coordinator, routeStore, replyMessage, sendUserMessage } = createHarness();
+    const completion = event('permanent-fallback');
+    routeStore.bind({
+      threadId: completion.threadId,
+      chatId: 'oc_workbench',
+      rootMessageId: 'om_root',
+    });
+    replyMessage.mockRejectedValueOnce(new LarkMessageError('permission denied', 'permanent', 403));
+
     await expect(coordinator.deliver(completion, 'oc_workbench')).resolves.toEqual({
       destination: 'fallback_dm',
       messageId: 'om_dm',
@@ -216,12 +231,40 @@ describe('Codex notifier delivery coordinator', () => {
     expect(fallbackCard).toContain('目标群话题投递失败');
     expect(fallbackCard).not.toContain('codex_notifier_continue');
     expect(fallbackCard).not.toContain('codex_notifier_open_app');
-    expect(routeStore.get(completion.threadId, 'oc_workbench')).toBeDefined();
     expect(sendUserMessage.mock.calls[0]?.[4]).toBe(
       codexNotifierFallbackMessageUuid(completion.eventId),
     );
     expect(codexNotifierFallbackMessageUuid(completion.eventId)).not.toBe(
       codexNotifierMessageUuid(completion.eventId),
+    );
+  });
+
+  it('passes the delivery deadline to group sends and replies', async () => {
+    const { coordinator, sendMessage, replyMessage } = createHarness();
+    const controller = new AbortController();
+    const requestOptions = { timeoutMs: 1_234, signal: controller.signal };
+
+    await coordinator.deliver(event('deadline-root'), 'oc_workbench', requestOptions);
+    await coordinator.deliver(event('deadline-reply'), 'oc_workbench', requestOptions);
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      'cli_test',
+      'oc_workbench',
+      expect.any(String),
+      'interactive',
+      expect.any(String),
+      undefined,
+      requestOptions,
+    );
+    expect(replyMessage).toHaveBeenCalledWith(
+      'cli_test',
+      'om_root',
+      expect.any(String),
+      'interactive',
+      true,
+      expect.any(String),
+      undefined,
+      requestOptions,
     );
   });
 

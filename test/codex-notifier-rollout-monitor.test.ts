@@ -77,6 +77,35 @@ afterEach(() => {
 });
 
 describe('Codex rollout completion monitor', () => {
+  it('does not perform a full historical discovery on every fast poll', () => {
+    const codexHome = mkdtempSync(join(tmpdir(), 'botmux-rollout-monitor-cadence-'));
+    temporaryDirs.push(codexHome);
+    let now = Date.parse('2026-08-23T02:20:00.000Z');
+    const listRollouts = vi.fn(() => []);
+    const instance = new CodexRolloutCompletionMonitor({
+      dataDir: '/tmp/botmux-rollout-monitor-test',
+      codexHome,
+      now: () => now,
+      readConfig: () => ({
+        enabled: true,
+        targetBotAppId: 'cli_target',
+        targetChatId: 'oc_workbench',
+        notifyWhen: 'always',
+      }),
+      logger: { debug: () => undefined, warn: () => undefined },
+      enqueue: vi.fn(),
+      listRollouts,
+    });
+
+    instance.pollOnce();
+    instance.pollOnce();
+    expect(listRollouts).toHaveBeenCalledTimes(1);
+
+    now += 60_000;
+    instance.pollOnce();
+    expect(listRollouts).toHaveBeenCalledTimes(2);
+  });
+
   it('baselines history and enqueues only a later App completion', () => {
     const codexHome = mkdtempSync(join(tmpdir(), 'botmux-rollout-monitor-'));
     temporaryDirs.push(codexHome);

@@ -4,7 +4,7 @@ import {
   statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { codexSessionIdFromRolloutPath } from '../../services/codex-transcript.js';
 import { baselineJsonlCursor, scanJsonlFromOffset } from '../../services/jsonl-cursor.js';
 import { readCodexTurnContext } from './codex-context.js';
@@ -20,6 +20,7 @@ import {
 import type { CodexTaskStatus } from './types.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
+const DEFAULT_FULL_RECONCILE_INTERVAL_MS = 60_000;
 const MAX_TRACKED_ROLLOUTS = 256;
 
 interface CodexRolloutFile {
@@ -46,39 +47,65 @@ function childDirectories(path: string): string[] {
   }
 }
 
-/** Codex 固定使用 sessions/YYYY/MM/DD；只遍历这三层并按活跃时间保留最近文件。 */
-export function listCodexRolloutFiles(codexHome: string): CodexRolloutFile[] {
-  const root = join(codexHome, 'sessions');
-  if (!existsSync(root)) return [];
+function rolloutFilesInDays(days: string[]): CodexRolloutFile[] {
   const result: CodexRolloutFile[] = [];
-  for (const year of childDirectories(root)) {
-    for (const month of childDirectories(year)) {
-      for (const day of childDirectories(month)) {
-        let entries;
-        try {
-          entries = readdirSync(day, { withFileTypes: true });
-        } catch {
-          continue;
-        }
-        for (const entry of entries) {
-          if (!entry.isFile()) continue;
-          const sessionId = codexSessionIdFromRolloutPath(entry.name);
-          if (!sessionId) continue;
-          const path = join(day, entry.name);
-          try {
-            const stat = statSync(path);
-            if (!stat.isFile()) continue;
-            result.push({ path, sessionId, size: stat.size, mtimeMs: stat.mtimeMs });
-          } catch {
-            // Codex 可能在扫描时清理尚未使用的 transcript。
-          }
-        }
+  for (const day of days) {
+    let entries;
+    try {
+      entries = readdirSync(day, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const sessionId = codexSessionIdFromRolloutPath(entry.name);
+      if (!sessionId) continue;
+      const path = join(day, entry.name);
+      try {
+        const stat = statSync(path);
+        if (!stat.isFile()) continue;
+        result.push({ path, sessionId, size: stat.size, mtimeMs: stat.mtimeMs });
+      } catch {
+        // Codex 可能在扫描时清理尚未使用的 transcript。
       }
     }
   }
   return result
     .sort((left, right) => right.mtimeMs - left.mtimeMs || left.path.localeCompare(right.path))
     .slice(0, MAX_TRACKED_ROLLOUTS);
+}
+
+/** Codex 固定使用 sessions/YYYY/MM/DD；只遍历这三层并按活跃时间保留最近文件。 */
+export function listCodexRolloutFiles(codexHome: string): CodexRolloutFile[] {
+  const root = join(codexHome, 'sessions');
+  if (!existsSync(root)) return [];
+  const days: string[] = [];
+  for (const year of childDirectories(root)) {
+    for (const month of childDirectories(year)) {
+      days.push(...childDirectories(month));
+    }
+  }
+  return rolloutFilesInDays(days);
+}
+
+function listTodayCodexRolloutFiles(codexHome: string, now: number): CodexRolloutFile[] {
+  const date = new Date(now);
+  const year = String(date.getFullYear()).padStart(4, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return rolloutFilesInDays([join(codexHome, 'sessions', year, month, day)]);
+}
+
+function refreshKnownRollout(path: string): CodexRolloutFile | undefined {
+  const sessionId = codexSessionIdFromRolloutPath(basename(path));
+  if (!sessionId) return undefined;
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile()) return undefined;
+    return { path, sessionId, size: stat.size, mtimeMs: stat.mtimeMs };
+  } catch {
+    return undefined;
+  }
 }
 
 function parseTerminalLine(line: string): RolloutTerminal | undefined {
@@ -128,26 +155,31 @@ export interface CodexRolloutCompletionMonitorOptions {
   signal?: AbortSignal;
   codexHome?: string;
   pollIntervalMs?: number;
+  fullReconcileIntervalMs?: number;
   now?: () => number;
   logger?: Pick<Console, 'debug' | 'warn'>;
   readConfig?: () => ResolvedCodexNotifierConfig;
   detectLockState?: () => ScreenLockState;
   enqueue?: typeof enqueueCodexNotifierEvent;
   listRollouts?: (codexHome: string) => CodexRolloutFile[];
+  listTodayRollouts?: (codexHome: string, now: number) => CodexRolloutFile[];
 }
 
 /** 监听普通 Codex App rollout，补齐启动 Hook 前已打开的长驻会话。 */
 export class CodexRolloutCompletionMonitor {
   private readonly codexHome: string;
   private readonly pollIntervalMs: number;
+  private readonly fullReconcileIntervalMs: number;
   private readonly now: () => number;
   private readonly logger: Pick<Console, 'debug' | 'warn'>;
   private readonly readConfig: () => ResolvedCodexNotifierConfig;
   private readonly detectLockState: () => ScreenLockState;
   private readonly enqueue: typeof enqueueCodexNotifierEvent;
   private readonly listRollouts: (codexHome: string) => CodexRolloutFile[];
+  private readonly listTodayRollouts: (codexHome: string, now: number) => CodexRolloutFile[];
   private readonly offsets = new Map<string, number>();
   private observationStartedAt: number | undefined;
+  private lastFullReconcileAt: number | undefined;
 
   constructor(private readonly options: CodexRolloutCompletionMonitorOptions) {
     const configuredCodexHome = process.env.CODEX_HOME?.trim();
@@ -158,17 +190,24 @@ export class CodexRolloutCompletionMonitor {
     if (!Number.isSafeInteger(this.pollIntervalMs) || this.pollIntervalMs <= 0) {
       throw new Error('codex_rollout_monitor_interval_invalid');
     }
+    this.fullReconcileIntervalMs = options.fullReconcileIntervalMs
+      ?? DEFAULT_FULL_RECONCILE_INTERVAL_MS;
+    if (!Number.isSafeInteger(this.fullReconcileIntervalMs) || this.fullReconcileIntervalMs <= 0) {
+      throw new Error('codex_rollout_monitor_reconcile_interval_invalid');
+    }
     this.now = options.now ?? Date.now;
     this.logger = options.logger ?? console;
     this.readConfig = options.readConfig ?? resolveCodexNotifierConfig;
     this.detectLockState = options.detectLockState ?? detectScreenLock;
     this.enqueue = options.enqueue ?? enqueueCodexNotifierEvent;
     this.listRollouts = options.listRollouts ?? listCodexRolloutFiles;
+    this.listTodayRollouts = options.listTodayRollouts ?? listTodayCodexRolloutFiles;
   }
 
   private stopObservation(): void {
     this.offsets.clear();
     this.observationStartedAt = undefined;
+    this.lastFullReconcileAt = undefined;
   }
 
   pollOnce(): void {
@@ -178,18 +217,39 @@ export class CodexRolloutCompletionMonitor {
       return;
     }
 
-    const files = this.listRollouts(this.codexHome);
+    const now = this.now();
+    const fullReconcile = this.lastFullReconcileAt === undefined
+      || now - this.lastFullReconcileAt >= this.fullReconcileIntervalMs;
+    const discovered = fullReconcile
+      ? this.listRollouts(this.codexHome)
+      : this.listTodayRollouts(this.codexHome, now);
+    if (fullReconcile) this.lastFullReconcileAt = now;
+
+    const filesByPath = new Map(discovered.map(file => [file.path, file]));
+    if (!fullReconcile) {
+      for (const path of this.offsets.keys()) {
+        if (filesByPath.has(path)) continue;
+        const refreshed = refreshKnownRollout(path);
+        if (refreshed) filesByPath.set(path, refreshed);
+        else this.offsets.delete(path);
+      }
+    }
+    const files = [...filesByPath.values()]
+      .sort((left, right) => right.mtimeMs - left.mtimeMs || left.path.localeCompare(right.path))
+      .slice(0, MAX_TRACKED_ROLLOUTS);
     if (this.observationStartedAt === undefined) {
-      this.observationStartedAt = this.now();
+      this.observationStartedAt = now;
       for (const file of files) {
         this.offsets.set(file.path, baselineJsonlCursor(file.path).newOffset);
       }
       return;
     }
 
-    const present = new Set(files.map(file => file.path));
-    for (const path of this.offsets.keys()) {
-      if (!present.has(path)) this.offsets.delete(path);
+    if (fullReconcile) {
+      const present = new Set(files.map(file => file.path));
+      for (const path of this.offsets.keys()) {
+        if (!present.has(path)) this.offsets.delete(path);
+      }
     }
 
     for (const file of files) {

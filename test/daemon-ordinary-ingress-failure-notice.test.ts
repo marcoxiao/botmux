@@ -303,6 +303,7 @@ describe('ordinary ingress terminal failure → actionable notice', () => {
 
     expect(repliedText()).toContain('当前离线');
     expect(repliedText()).toContain('没有排队');
+    expect(repliedText()).toContain('保持打开');
     expect(mocks.forkWorker).not.toHaveBeenCalled();
   });
 

@@ -130,6 +130,20 @@ describe('Codex notifier card action', () => {
     expect(openAppThread).not.toHaveBeenCalled();
   });
 
+  it('does not adopt after notification is disabled or switched to another bot', async () => {
+    const { handler, adoptEvent } = makeHandler({
+      readConfig: () => ({ enabled: false, targetBotAppId: 'cli_other' }),
+    });
+
+    await expect(handler(action('codex_notifier_continue'), APP_ID)).resolves.toEqual({
+      toast: {
+        type: 'error',
+        content: 'Codex 完成通知功能已关闭或已切换目标机器人',
+      },
+    });
+    expect(adoptEvent).not.toHaveBeenCalled();
+  });
+
   it('only opens events from a trusted Codex App source', async () => {
     const { handler, openAppThread } = makeHandler({
       getEventRecord: () => ({

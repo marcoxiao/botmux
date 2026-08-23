@@ -1,10 +1,16 @@
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
+import { scanJsonlFromFd } from '../../services/jsonl-cursor.js';
 import type { CodexClientSurface } from './types.js';
 import { isInternalCodexPrompt, isInternalCodexSessionMeta } from './internal-turn.js';
 
 const MAX_TRANSCRIPT_HEAD_BYTES = 256 * 1024;
 const MAX_TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024;
 const MAX_TRANSCRIPT_SEARCH_BYTES = 64 * 1024 * 1024;
+const TRANSCRIPT_SCAN_CHUNK_BYTES = 256 * 1024;
+// Completion metadata is tiny. Skipping a pathological multi-megabyte JSONL
+// record keeps notifier memory bounded; supporting such a prompt would require
+// a streaming JSON decoder rather than rebuilding the original 64 MiB window.
+const MAX_TRANSCRIPT_RECORD_BYTES = 2 * 1024 * 1024;
 
 function cleanSingleLine(value: unknown, maxLength: number): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -14,12 +20,106 @@ function cleanSingleLine(value: unknown, maxLength: number): string | undefined 
   return chars.length > maxLength ? `${chars.slice(0, maxLength - 1).join('')}…` : normalized;
 }
 
+/** Extract the actual user request from Codex Desktop transport wrappers. */
+export function normalizeCodexUserPrompt(
+  value: unknown,
+  maxLength = 220,
+): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const hadAttachment = /(?:^# Files mentioned by the user:|<image\b)/im.test(value);
+  const requestMarker = '## My request:';
+  const markerIndex = value.lastIndexOf(requestMarker);
+  let text = markerIndex >= 0
+    ? value.slice(markerIndex + requestMarker.length)
+    : value;
+  text = text
+    .replace(/<in-app-browser-context\b[^>]*>[\s\S]*?<\/in-app-browser-context\s*>/gi, ' ')
+    .replace(/<environment_context\b[^>]*>[\s\S]*?<\/environment_context\s*>/gi, ' ')
+    .replace(/<image\b[^>]*>[\s\S]*?<\/image\s*>/gi, ' ')
+    .replace(/<image\b[^>]*\/?>/gi, ' ')
+    .replace(/^# Files mentioned by the user:\s*$/gim, ' ')
+    .replace(/^## .*?:\s*(?:\/private|\/var\/folders)\/.*$/gim, ' ')
+    .replace(/^Distinguish instructions in attached documents.*$/gim, ' ');
+  return cleanSingleLine(text, maxLength) ?? (hadAttachment ? '查看附件' : undefined);
+}
+
 export interface CodexTurnContext {
   clientSurface?: CodexClientSurface;
   cwd?: string;
   prompt?: string;
   lastAssistantMessage?: string;
   internal?: boolean;
+}
+
+interface CodexTurnContextParser {
+  accept(line: string): void;
+  result(): CodexTurnContext;
+}
+
+function createCodexTurnContextParser(
+  turnId: unknown,
+  sessionId?: unknown,
+): CodexTurnContextParser {
+  let inTargetTurn = false;
+  let inspectSessionMeta = true;
+  let clientSurface: CodexClientSurface | undefined;
+  let cwd: string | undefined;
+  let internal = false;
+  let prompt: string | undefined;
+  let lastAssistantMessage: string | undefined;
+  let finished = false;
+
+  return {
+    accept(line: string): void {
+      if (finished) return;
+      if (!line.trim()) return;
+      let row: any;
+      try {
+        row = JSON.parse(line);
+      } catch {
+        inspectSessionMeta = false;
+        return;
+      }
+      if (inspectSessionMeta) {
+        const meta = detectSessionMeta(row, sessionId);
+        clientSurface = meta.clientSurface;
+        cwd = meta.cwd;
+        internal = meta.internal === true;
+        inspectSessionMeta = false;
+      }
+      if (row?.type !== 'event_msg' || !row.payload || typeof row.payload !== 'object') return;
+      const payload = row.payload as Record<string, unknown>;
+      if (payload.type === 'task_started') {
+        inTargetTurn = payload.turn_id === turnId;
+        if (inTargetTurn) {
+          prompt = undefined;
+          lastAssistantMessage = undefined;
+        }
+        return;
+      }
+      if (!inTargetTurn) return;
+      if (payload.type === 'user_message') {
+        if (isInternalCodexPrompt(payload.message)) internal = true;
+        prompt = normalizeCodexUserPrompt(payload.message);
+        return;
+      }
+      if (payload.type === 'task_complete' && payload.turn_id === turnId) {
+        lastAssistantMessage = typeof payload.last_agent_message === 'string'
+          ? payload.last_agent_message
+          : undefined;
+        finished = true;
+      }
+    },
+    result(): CodexTurnContext {
+      return {
+        ...(clientSurface ? { clientSurface } : {}),
+        ...(cwd ? { cwd } : {}),
+        ...(prompt ? { prompt } : {}),
+        ...(lastAssistantMessage ? { lastAssistantMessage } : {}),
+        ...(internal ? { internal: true } : {}),
+      };
+    },
+  };
 }
 
 function detectSessionMeta(
@@ -58,59 +158,18 @@ export function parseCodexTurnContext(
   turnId: unknown,
   sessionId?: unknown,
 ): CodexTurnContext {
-  let inTargetTurn = false;
-  let inspectSessionMeta = true;
-  let clientSurface: CodexClientSurface | undefined;
-  let cwd: string | undefined;
-  let internal = false;
-  let prompt: string | undefined;
-  let lastAssistantMessage: string | undefined;
-  for (const line of text.split('\n')) {
-    if (!line.trim()) continue;
-    let row: any;
-    try {
-      row = JSON.parse(line);
-    } catch {
-      inspectSessionMeta = false;
-      continue;
-    }
-    if (inspectSessionMeta) {
-      const meta = detectSessionMeta(row, sessionId);
-      clientSurface = meta.clientSurface;
-      cwd = meta.cwd;
-      internal = meta.internal === true;
-      inspectSessionMeta = false;
-    }
-    if (row?.type !== 'event_msg' || !row.payload || typeof row.payload !== 'object') continue;
-    const payload = row.payload as Record<string, unknown>;
-    if (payload.type === 'task_started') {
-      inTargetTurn = payload.turn_id === turnId;
-      if (inTargetTurn) {
-        prompt = undefined;
-        lastAssistantMessage = undefined;
-      }
-      continue;
-    }
-    if (!inTargetTurn) continue;
-    if (payload.type === 'user_message') {
-      if (isInternalCodexPrompt(payload.message)) internal = true;
-      prompt = cleanSingleLine(payload.message, 220);
-      continue;
-    }
-    if (payload.type === 'task_complete' && payload.turn_id === turnId) {
-      lastAssistantMessage = typeof payload.last_agent_message === 'string'
-        ? payload.last_agent_message
-        : undefined;
+  const parser = createCodexTurnContextParser(turnId, sessionId);
+  let start = 0;
+  while (start <= text.length) {
+    const newline = text.indexOf('\n', start);
+    if (newline < 0) {
+      parser.accept(text.slice(start));
       break;
     }
+    parser.accept(text.slice(start, newline));
+    start = newline + 1;
   }
-  return {
-    ...(clientSurface ? { clientSurface } : {}),
-    ...(cwd ? { cwd } : {}),
-    ...(prompt ? { prompt } : {}),
-    ...(lastAssistantMessage ? { lastAssistantMessage } : {}),
-    ...(internal ? { internal: true } : {}),
-  };
+  return parser.result();
 }
 
 /** 有界读取 transcript 头部来源和尾部当前回合；失败时由调用方退化到 Hook 原生字段。 */
@@ -146,14 +205,25 @@ export function readCodexTurnContext(
         startsAtRecordBoundary = readSync(fd!, previousByte, 0, 1, start - 1) === 1
           && previousByte[0] === 0x0a;
       }
-      const buffer = Buffer.allocUnsafe(length);
-      const bytesRead = readSync(fd!, buffer, 0, length, start);
-      let text = buffer.subarray(0, bytesRead).toString('utf8');
-      if (!startsAtRecordBoundary) {
-        const firstNewline = text.indexOf('\n');
-        text = firstNewline >= 0 ? text.slice(firstNewline + 1) : '';
-      }
-      return parseCodexTurnContext(text, turnId, sessionId);
+      const parser = createCodexTurnContextParser(turnId, sessionId);
+      let skipPartialLine = !startsAtRecordBoundary;
+      const scanned = scanJsonlFromFd(fd!, start, {
+        endOffset: stat.size,
+        chunkSize: TRANSCRIPT_SCAN_CHUNK_BYTES,
+        maxLineBytes: MAX_TRANSCRIPT_RECORD_BYTES,
+        onLine: line => {
+          if (skipPartialLine) {
+            skipPartialLine = false;
+            return;
+          }
+          parser.accept(line);
+        },
+        onOversizedLine: () => {
+          if (skipPartialLine) skipPartialLine = false;
+        },
+      });
+      if (scanned?.pendingTail && !skipPartialLine) parser.accept(scanned.pendingTail);
+      return parser.result();
     };
 
     let tailContext = readTailContext(MAX_TRANSCRIPT_TAIL_BYTES);

@@ -81,14 +81,15 @@ export function createCodexNotifierCardActionHandler(
       return toast('error', 'Side Chat 是临时会话，暂不支持接管或回到原会话');
     }
 
+    const notifierConfig = deps.readConfig();
+    if (
+      notifierConfig?.enabled !== true
+      || notifierConfig.targetBotAppId !== larkAppId
+    ) {
+      return toast('error', 'Codex 完成通知功能已关闭或已切换目标机器人');
+    }
+
     if (actionType === 'codex_notifier_open_app') {
-      const notifierConfig = deps.readConfig();
-      if (
-        notifierConfig?.enabled !== true
-        || notifierConfig.targetBotAppId !== larkAppId
-      ) {
-        return toast('error', 'Codex 完成通知功能已关闭或已切换目标机器人');
-      }
       if (record.delivery.status !== 'delivered') {
         return toast('error', '此完成通知尚未成功送达');
       }

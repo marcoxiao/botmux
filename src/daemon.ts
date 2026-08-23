@@ -395,6 +395,7 @@ import {
   codexNotifierTopicRoutesPath,
   createCodexNotifierCardActionHandler,
   materializeCodexNotifierOutboxEvent,
+  openCodexNotifierStoreWithRecovery,
   openCodexAppThread,
   parseCodexNotifierEvent,
   parseCodexNotifierPluginEvent,
@@ -4887,9 +4888,12 @@ function codexNotifierStore(larkAppId: string): CodexNotifierEventStore {
   const existing = codexNotifierStores.get(larkAppId);
   if (existing) return existing;
   const suffix = createHash('sha256').update(larkAppId).digest('hex').slice(0, 16);
-  const store = new CodexNotifierEventStore(
-    join(config.session.dataDir, 'plugin-events', `codex-notifier-${suffix}.json`),
-  );
+  const filePath = join(config.session.dataDir, 'plugin-events', `codex-notifier-${suffix}.json`);
+  const store = openCodexNotifierStoreWithRecovery({
+    filePath,
+    open: () => new CodexNotifierEventStore(filePath),
+    logWarn: message => logger.warn(message),
+  });
   codexNotifierStores.set(larkAppId, store);
   return store;
 }
@@ -4897,9 +4901,12 @@ function codexNotifierStore(larkAppId: string): CodexNotifierEventStore {
 function codexNotifierTopicRouteStore(larkAppId: string): CodexNotifierTopicRouteStore {
   const existing = codexNotifierTopicRouteStores.get(larkAppId);
   if (existing) return existing;
-  const store = new CodexNotifierTopicRouteStore(
-    codexNotifierTopicRoutesPath(config.session.dataDir, larkAppId),
-  );
+  const filePath = codexNotifierTopicRoutesPath(config.session.dataDir, larkAppId);
+  const store = openCodexNotifierStoreWithRecovery({
+    filePath,
+    open: () => new CodexNotifierTopicRouteStore(filePath),
+    logWarn: message => logger.warn(message),
+  });
   codexNotifierTopicRouteStores.set(larkAppId, store);
   return store;
 }
@@ -5292,10 +5299,10 @@ async function adoptCodexNotifierEvent(
   }
 
   const baseAdoptNotice = chatType === 'p2p' && scope === 'chat'
-    ? '现在可以直接在当前私聊继续发送指令，消息会进入同一个 Codex App 任务；电脑或 Codex App 离线时会明确提示，不会排队。'
-    : '请在本卡片的话题中继续发送指令，消息会进入同一个 Codex App 任务；电脑或 Codex App 离线时会明确提示，不会排队。';
+    ? '现在可以直接在当前私聊继续发送指令，消息会进入同一个 Codex App 任务；请让原任务在 Codex App 中保持打开，离线时会明确提示，不会排队。'
+    : '请在本卡片的话题中继续发送指令，消息会进入同一个 Codex App 任务；请让原任务在 Codex App 中保持打开，离线时会明确提示，不会排队。';
   return buildCodexNotifierResultCard(
-    '已连接 Codex App 任务',
+    '已绑定 Codex App 任务',
     bufferedInputDropped
       ? `⚠️ 你此前发送但尚未送达的消息未随本次接管发送，请重新发送一次。\n\n${baseAdoptNotice}`
       : baseAdoptNotice,
@@ -19974,7 +19981,7 @@ async function handleThreadReplyAdmitted(
       );
     } catch (error) {
       const message = error instanceof CodexDesktopUnavailableError
-        ? 'Codex App 当前离线，或该任务未在 App 中打开。本条消息没有排队，请打开原任务后重新发送。'
+        ? 'Codex App 当前离线，或原任务未在 App 中保持打开。本条消息没有排队，请打开原任务后重新发送。'
         : '发送到 Codex App 失败，本条消息没有排队，请稍后重新发送。';
       await sessionReply(anchor, message, 'text', larkAppId);
       markIngressAdmitted(ctx);
