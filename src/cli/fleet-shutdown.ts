@@ -10,6 +10,8 @@ export type FleetProcessEntry = {
   autorestart?: boolean | string;
   stopExitCodes?: unknown[];
   exitCode?: number;
+  /** Canonical script path recorded by PM2 for this registry row. */
+  execPath?: string;
 };
 
 export interface FleetShutdownRuntime {

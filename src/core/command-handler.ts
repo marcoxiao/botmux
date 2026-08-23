@@ -99,6 +99,7 @@ import { updateSessionTitle } from './session-title.js';
 import { requestAgentSessionRename } from './session-rename.js';
 import { hasProtectedSessionMutationOwnership } from './session-mutation-guard.js';
 import { withBotTurnMutation } from './bot-turn-mutation-gate.js';
+import { refreshSessionPluginManifest } from './plugins/session-manifest.js';
 import { rehomeReplyTargetState } from './reply-target.js';
 import {
   configuredRuntimeDisplayName,
@@ -4371,6 +4372,15 @@ export async function startCodexAppThreadSession(
     if (hasProtectedSessionMutationOwnership(current)) {
       return { status: 'pending' as const, anchor: sessionAnchorId(current) };
     }
+    // Desktop follower sessions never spawn a BotMux worker, so no worker will
+    // create the per-generation plugin snapshot for them. Freeze the current
+    // Bot policy here, before mutating/retiring the existing session, so the
+    // normal turn-progress host can render the same plugin card.
+    refreshSessionPluginManifest({
+      sessionId: current.session.sessionId,
+      bot: getBot(current.larkAppId).config,
+      global: readGlobalConfig(),
+    });
     // Retire any ordinary BotMux worker before changing the durable transport.
     // The native Desktop remains the only Codex writer; this session owns no
     // replacement worker and all future turns route through follower IPC.

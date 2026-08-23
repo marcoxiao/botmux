@@ -163,6 +163,10 @@ vi.mock('../src/services/session-store.js', () => ({
   collectBotmuxSessionIdentities: vi.fn(() => new Set<string>()),
 }));
 
+vi.mock('../src/core/plugins/session-manifest.js', () => ({
+  refreshSessionPluginManifest: vi.fn(),
+}));
+
 vi.mock('../src/services/schedule-store.js', () => ({
   listTasks: vi.fn(() => []),
 }));
@@ -489,6 +493,7 @@ vi.mock('../src/services/card-mode-store.js', () => ({
 // ─── Imports (after mocks) ──────────────────────────────────────────────────
 
 import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, PASSTHROUGH_COMMANDS, resolvePassthroughCommands, resolveAdapterDefaultPassthroughCommands, handleCommand, handleCardCommand, handleTermLinkCommand, parseSlashCommandInvocation, parseForceTopicInvocation, startAdoptSession, startResumeImportSession, startCodexAppThreadSession, startForkSubtopicSession } from '../src/core/command-handler.js';
+import { refreshSessionPluginManifest } from '../src/core/plugins/session-manifest.js';
 import { setCardMode } from '../src/services/card-mode-store.js';
 import { writeRoleFile, deleteRoleFile, writeTeamRoleFile, deleteTeamRoleFile, resolveRole, resolveRoleFile } from '../src/core/role-resolver.js';
 import { setBotCapability, clearBotCapability } from '../src/services/bot-profile-store.js';
@@ -4264,6 +4269,10 @@ describe('handleCommand', () => {
       expect(ds.session.nativeSessionTitleUserDefined).toBeUndefined();
       expect(ds.session.nativeSessionTitleAwaitingContent).toBeUndefined();
       expect(sessionStore.updateSession).toHaveBeenCalledWith(ds.session);
+      expect(refreshSessionPluginManifest).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: ds.session.sessionId,
+        bot: expect.objectContaining({ larkAppId: LARK_APP_ID }),
+      }));
       expect(probeCodexDesktopThread).toHaveBeenCalledWith('01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35');
       expect(killWorker).toHaveBeenCalledWith(ds);
       expect(forkWorker).not.toHaveBeenCalled();

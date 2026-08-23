@@ -20,6 +20,9 @@ import { normalizeTurnProgressFact, type TurnProgressPluginV1 } from './protocol
 export interface TurnProgressControllerDeps {
   reply(cardRefJson: string, turnId: string, uuid: string): Promise<string>;
   reactDone(primaryTurnId: string): Promise<void>;
+  /** Optional non-worker lifecycle authority (for example a Desktop IPC
+   * follower). Ordinary worker-backed turns keep the strict generation check. */
+  isGenerationActive?(workerGeneration: number): boolean;
 }
 
 type EnsureHostResult =
@@ -160,7 +163,14 @@ function persistBinding(ds: DaemonSession, binding: typeof ds.session.turnProgre
   }
 }
 
-function ownsGeneration(ds: DaemonSession, workerGeneration: number): boolean {
+function ownsGeneration(
+  ds: DaemonSession,
+  workerGeneration: number,
+  deps?: TurnProgressControllerDeps,
+): boolean {
+  if (deps?.isGenerationActive) {
+    return ds.session.status === 'active' && deps.isGenerationActive(workerGeneration);
+  }
   return ds.session.status === 'active'
     && ds.workerGeneration === workerGeneration
     && ds.session.workerGeneration === workerGeneration;
@@ -172,7 +182,7 @@ function hostDeps(
   deps: TurnProgressControllerDeps,
 ) {
   return {
-    active: () => ownsGeneration(ds, workerGeneration),
+    active: () => ownsGeneration(ds, workerGeneration, deps),
     create: async (cardJson: string) => {
       const { createCardEntity } = await import('../../im/lark/client.js');
       return createCardEntity(ds.larkAppId, cardJson);
@@ -217,7 +227,7 @@ async function ensureHost(
   eligibility: TurnProgressEligibilityInput,
   deps: TurnProgressControllerDeps,
 ): Promise<EnsureHostResult> {
-  if (!ownsGeneration(ds, workerGeneration)) return { kind: 'ignored' };
+  if (!ownsGeneration(ds, workerGeneration, deps)) return { kind: 'ignored' };
   if (ds.turnProgressLegacyFallbackTurns?.has(turnId)) return { kind: 'fallback' };
 
   let binding = ds.session.turnProgressBinding;
@@ -252,9 +262,9 @@ async function ensureHost(
     try {
       plugin = (await loadOnce(ds, workerGeneration, binding.pluginId)).plugin;
     } catch (error) {
-      if (ownsGeneration(ds, workerGeneration)) diagnoseOnce(ds, 'restored_plugin_load_failed', error);
+      if (ownsGeneration(ds, workerGeneration, deps)) diagnoseOnce(ds, 'restored_plugin_load_failed', error);
     }
-    if (!ownsGeneration(ds, workerGeneration)) return { kind: 'ignored' };
+    if (!ownsGeneration(ds, workerGeneration, deps)) return { kind: 'ignored' };
     const host = TurnProgressHost.restore(
       plugin,
       contextFor(
@@ -275,12 +285,12 @@ async function ensureHost(
   try {
     loaded = await loadOnce(ds, workerGeneration, effective.pluginId);
   } catch (error) {
-    if (!ownsGeneration(ds, workerGeneration)) return { kind: 'ignored' };
+    if (!ownsGeneration(ds, workerGeneration, deps)) return { kind: 'ignored' };
     diagnoseOnce(ds, 'plugin_load_failed', error);
     markFallback(ds, turnId);
     return { kind: 'fallback' };
   }
-  if (!ownsGeneration(ds, workerGeneration)) return { kind: 'ignored' };
+  if (!ownsGeneration(ds, workerGeneration, deps)) return { kind: 'ignored' };
   const currentStart = hostStarts.get(ds);
   if (currentStart
     && (currentStart.generation !== workerGeneration
@@ -311,11 +321,11 @@ async function ensureHost(
     host = await start.promise;
   } catch (error) {
     diagnoseOnce(ds, 'host_start_failed', error);
-    if (!ownsGeneration(ds, workerGeneration) || ds.session.turnProgressBinding) return { kind: 'ignored' };
+    if (!ownsGeneration(ds, workerGeneration, deps) || ds.session.turnProgressBinding) return { kind: 'ignored' };
     markFallback(ds, turnId);
     return { kind: 'fallback' };
   }
-  if (!ownsGeneration(ds, workerGeneration)) {
+  if (!ownsGeneration(ds, workerGeneration, deps)) {
     host?.dispose();
     return { kind: 'ignored' };
   }
@@ -493,14 +503,17 @@ export async function deliverFinalThroughProgressCard(
     suppressDelivery: message.suppressDelivery === true,
     steerSuperseded: message.disposition === 'steer_superseded',
   };
-  if (!canDeliverFinalInProgressCard(effective) || ds.workerGeneration === undefined) {
+  const workerGeneration = deps.isGenerationActive
+    ? binding.workerGeneration
+    : ds.workerGeneration;
+  if (!canDeliverFinalInProgressCard(effective) || workerGeneration === undefined) {
     return { kind: 'not_applicable' };
   }
   const ensured = await ensureHost(
     ds,
     message.turnId,
     message.dispatchAttempt,
-    ds.workerGeneration,
+    workerGeneration,
     effective,
     deps,
   );

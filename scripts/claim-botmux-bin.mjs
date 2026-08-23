@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync, unlinkSync, realpathSync, chmodSync } from 'node:fs';
+import { assertLiveCheckout, pinLiveCheckout } from './live-checkout-pin.mjs';
 
 // 原子写（与 src/utils/atomic-write.ts 同构，.mjs 不依赖 dist 故内联）：
 // 这个 wrapper 随时被并发会话 exec，裸写半截会让它们的 `botmux send` 全体失败。
@@ -39,6 +40,8 @@ if (process.env.BOTMUX_NO_CLAIM) {
 }
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+if (process.env.BOTMUX_FORCE_LIVE_CHECKOUT === '1') pinLiveCheckout(repoRoot);
+assertLiveCheckout(repoRoot);
 const cliScript = join(repoRoot, 'dist', 'cli.js');
 const binDir = join(homedir(), '.botmux', 'bin');
 const wrapper = join(binDir, 'botmux');

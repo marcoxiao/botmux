@@ -192,6 +192,9 @@ import {
   getDaemonBootId,
   getDaemonStreamingCardUsageSnapshot,
   postTurnStartingCard,
+  startDesktopFollowerTurnProgress,
+  deliverDesktopFollowerFinalThroughProgressCard,
+  waitForDesktopFollowerTurnProgress,
   isSessionTransferring,
   snapshotCodexAppFinalSettlements,
   codexAppFinalSettlementCount,
@@ -4911,6 +4914,30 @@ function codexNotifierTopicRouteStore(larkAppId: string): CodexNotifierTopicRout
   return store;
 }
 
+async function tryDeliverCodexNotifierThroughProgressCard(
+  larkAppId: string,
+  event: CodexTaskCompletedEvent,
+  card: string,
+  targetChatId?: string,
+): Promise<string | undefined> {
+  const matchesEvent = (ds: DaemonSession) =>
+    ds.larkAppId === larkAppId
+    && ds.session.status === 'active'
+    && ds.session.codexAppTransport === 'desktop-ipc'
+    && ds.session.cliSessionId === event.threadId
+    && (!targetChatId || ds.chatId === targetChatId);
+  const candidates = [...activeSessions.values()].filter(matchesEvent);
+  // Ultra-fast native turns can complete while CardKit is still attaching.
+  // Wait for that exact in-memory start, then re-evaluate the durable binding.
+  await Promise.all(candidates.map(ds => waitForDesktopFollowerTurnProgress(ds)));
+  const owner = [...activeSessions.values()].filter(ds =>
+    matchesEvent(ds) && ds.session.turnProgressBinding,
+  );
+  if (owner.length !== 1) return undefined;
+  const result = await deliverDesktopFollowerFinalThroughProgressCard(owner[0]!, card);
+  return result.kind === 'delivered' ? result.messageId : undefined;
+}
+
 function codexNotifierDeliveryCoordinator(larkAppId: string): CodexNotifierDeliveryCoordinator {
   const existing = codexNotifierDeliveryCoordinators.get(larkAppId);
   if (existing) return existing;
@@ -4918,6 +4945,8 @@ function codexNotifierDeliveryCoordinator(larkAppId: string): CodexNotifierDeliv
     larkAppId,
     routeStore: codexNotifierTopicRouteStore(larkAppId),
     getOwnerOpenId: () => getOwnerOpenId(larkAppId) ?? resolvePrimaryOwnerOpenId(larkAppId),
+    tryProgressDelivery: (event, card, targetChatId) =>
+      tryDeliverCodexNotifierThroughProgressCard(larkAppId, event, card, targetChatId),
   });
   codexNotifierDeliveryCoordinators.set(larkAppId, coordinator);
   return coordinator;
@@ -19961,6 +19990,11 @@ async function handleThreadReplyAdmitted(
       markIngressAdmitted(ctx);
       return;
     }
+    // Start the plugin-owned progress card in parallel with Desktop delivery:
+    // presentation must never delay the native turn, while the registered
+    // promise lets the completion ingress wait out an ultra-fast `OK` turn
+    // instead of racing into a second legacy completion card.
+    const progressStart = startDesktopFollowerTurnProgress(ds, parsed.messageId);
     try {
       await sendCodexDesktopThreadTurn({
         threadId,
@@ -19983,7 +20017,22 @@ async function handleThreadReplyAdmitted(
       const message = error instanceof CodexDesktopUnavailableError
         ? 'Codex App 当前离线，或原任务未在 App 中保持打开。本条消息没有排队，请打开原任务后重新发送。'
         : '发送到 Codex App 失败，本条消息没有排队，请稍后重新发送。';
-      await sessionReply(anchor, message, 'text', larkAppId);
+      let progressDelivered = false;
+      try {
+        if (await progressStart === 'handled') {
+          const result = await deliverDesktopFollowerFinalThroughProgressCard(
+            ds,
+            JSON.stringify(buildCodexNotifierResultCard('Codex App 当前离线', message, 'red')),
+          );
+          progressDelivered = result.kind === 'delivered';
+        }
+      } catch (progressError) {
+        logger.warn(
+          `[${tag(ds)}] Desktop follower failure card failed ${parsed.messageId}: `
+          + `${progressError instanceof Error ? progressError.message : String(progressError)}`,
+        );
+      }
+      if (!progressDelivered) await sessionReply(anchor, message, 'text', larkAppId);
       markIngressAdmitted(ctx);
       logger.warn(
         `[${tag(ds)}] Desktop follower rejected ${parsed.messageId}: `

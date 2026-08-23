@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   updateSession: vi.fn(),
   load: vi.fn(),
   workerReply: vi.fn(),
+  ensureManifest: vi.fn(),
 }));
 
 vi.mock('../src/core/plugins/session-manifest.js', () => ({
@@ -24,6 +25,7 @@ vi.mock('../src/core/plugins/session-manifest.js', () => ({
     pluginIds: [...mocks.pluginIds],
     generatedAt: '2026-08-22T00:00:00.000Z',
   }),
+  ensureSessionPluginManifest: (...args: unknown[]) => mocks.ensureManifest(...args),
 }));
 
 vi.mock('../src/core/plugins/runtime.js', () => ({
@@ -68,8 +70,10 @@ import {
 } from '../src/core/turn-progress/controller.js';
 import {
   __testOnly_setupWorkerHandlers,
+  deliverDesktopFollowerFinalThroughProgressCard,
   initWorkerPool,
   postTurnStartingCard,
+  startDesktopFollowerTurnProgress,
 } from '../src/core/worker-pool.js';
 
 function fakeWorker(): EventEmitter & { killed: boolean; send: ReturnType<typeof vi.fn>; kill: ReturnType<typeof vi.fn>; pid: number } {
@@ -154,6 +158,7 @@ describe('turn progress worker routing controller', () => {
     deps.reply.mockClear();
     deps.reactDone.mockClear();
     mocks.workerReply.mockReset().mockResolvedValue('legacy-message-1');
+    mocks.ensureManifest.mockReset();
     initWorkerPool({
       sessionReply: (...args: unknown[]) => mocks.workerReply(...args),
       getSessionWorkingDir: () => '/tmp',
@@ -216,6 +221,28 @@ describe('turn progress worker routing controller', () => {
     await vi.waitFor(() => expect(ds.workerPort).toBe(9999));
     expect(mocks.workerReply).not.toHaveBeenCalled();
     expect(ds.streamCardPending).toBe(true);
+  });
+
+  it('uses the same plugin card for a Desktop follower turn and its final result', async () => {
+    const ds = daemonSession();
+    ds.session.codexAppTransport = 'desktop-ipc';
+    ds.workerGeneration = undefined;
+    ds.session.workerGeneration = undefined;
+
+    await expect(startDesktopFollowerTurnProgress(ds, 'turn-desktop'))
+      .resolves.toBe('handled');
+    expect(mocks.ensureManifest).toHaveBeenCalledOnce();
+    expect(mocks.create).toHaveBeenCalledOnce();
+    expect(mocks.workerReply).toHaveBeenCalledOnce();
+    expect(ds.session.turnProgressBinding?.primaryTurnId).toBe('turn-desktop');
+
+    await expect(deliverDesktopFollowerFinalThroughProgressCard(
+      ds,
+      JSON.stringify({ schema: '2.0', body: { elements: [{ tag: 'markdown', content: 'final' }] } }),
+    )).resolves.toMatchObject({ kind: 'delivered', messageId: 'legacy-message-1' });
+    expect(mocks.update).toHaveBeenCalledTimes(2);
+    expect(mocks.update.mock.calls.at(-1)?.[2]).toContain('final');
+    expect(ds.session.turnProgressBinding).toBeUndefined();
   });
 
   it('restores one legacy card when the first progress fact fails', async () => {

@@ -23,6 +23,11 @@ export interface CodexNotifierDeliveryCoordinatorOptions {
   sendMessage?: typeof larkSendMessage;
   replyMessage?: typeof larkReplyMessage;
   sendUserMessage?: typeof larkSendUserMessage;
+  tryProgressDelivery?: (
+    event: CodexTaskCompletedEvent,
+    card: string,
+    targetChatId?: string,
+  ) => Promise<string | undefined>;
   platform?: NodeJS.Platform;
 }
 
@@ -84,10 +89,13 @@ export class CodexNotifierDeliveryCoordinator {
     event: CodexTaskCompletedEvent,
     requestOptions?: LarkRequestOptions,
   ): Promise<CodexNotifierDeliveryResult> {
+    const card = buildCodexCompletionCard(event, { platform: this.options.platform });
+    const progressMessageId = await this.options.tryProgressDelivery?.(event, card);
+    if (progressMessageId) return { destination: 'dm', messageId: progressMessageId };
     const ownerOpenId = this.requireOwnerOpenId();
     const messageId = await this.sendOwner(
       ownerOpenId,
-      buildCodexCompletionCard(event, { platform: this.options.platform }),
+      card,
       codexNotifierMessageUuid(event.eventId),
       requestOptions,
     );
@@ -101,6 +109,8 @@ export class CodexNotifierDeliveryCoordinator {
   ): Promise<CodexNotifierDeliveryResult> {
     const route = this.options.routeStore.get(event.threadId, chatId);
     const card = buildCodexCompletionCard(event, { platform: this.options.platform });
+    const progressMessageId = await this.options.tryProgressDelivery?.(event, card, chatId);
+    if (progressMessageId) return { destination: 'group', messageId: progressMessageId };
     const uuid = codexNotifierMessageUuid(event.eventId);
 
     if (!route) {

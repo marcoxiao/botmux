@@ -3,6 +3,7 @@ import type { FleetProcessEntry } from '../src/cli/fleet-shutdown.js';
 import {
   assertDaemonPm2GracefulExitPolicy,
   assertConfiguredPm2FleetOnline,
+  assertConfiguredPm2FleetSource,
   assertConfiguredPm2FleetReady,
   assertExactAttestedDaemonSet,
   classifyStartBotFleetAdmission,
@@ -30,6 +31,20 @@ const configured = ['botmux-a', 'botmux-b', 'botmux-dashboard'];
 const alive = (pid: number) => pid > 0;
 
 describe('configured PM2 fleet start authority', () => {
+  it('refuses to restart dormant PM2 rows from a different checkout', () => {
+    expect(() => assertConfiguredPm2FleetSource('start', [
+      { ...row('botmux-a', 0, { online: false }), execPath: '/old/dist/index-daemon.js' },
+      { ...row('botmux-dashboard', 2, { online: false }), execPath: '/old/dist/index-dashboard.js' },
+    ], new Map([
+      ['botmux-a', '/current/dist/index-daemon.js'],
+      ['botmux-dashboard', '/current/dist/index-dashboard.js'],
+    ]))).toThrow(/different checkout.*botmux restart/);
+
+    expect(() => assertConfiguredPm2FleetSource('start', [
+      { ...row('botmux-a', 0, { online: false }), execPath: '/current/dist/index-daemon.js' },
+    ], new Map([['botmux-a', '/current/dist/index-daemon.js']]))).not.toThrow();
+  });
+
   it('requires the new daemon PM2 policy instead of trusting capability alone', () => {
     expect(() => assertDaemonPm2GracefulExitPolicy('start-idempotent-ready', [{
       ...row('botmux-a', 0),

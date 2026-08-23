@@ -64,6 +64,7 @@ const mocks = vi.hoisted(() => {
     forkWorker: vi.fn((ds: any) => {
       ds.worker = { killed: false, send: vi.fn() };
     }),
+    startDesktopFollowerTurnProgress: vi.fn(async () => 'handled' as const),
     scanMultipleProjects: vi.fn(() => [] as any[]),
     getAvailableBots: vi.fn(async () => [] as any[]),
     downloadResources: vi.fn(async () => ({ attachments: [], needLogin: false })),
@@ -111,7 +112,11 @@ vi.mock('../src/services/session-store.js', async () => {
 
 vi.mock('../src/core/worker-pool.js', async () => {
   const actual = await vi.importActual<any>('../src/core/worker-pool.js');
-  return { ...actual, forkWorker: mocks.forkWorker };
+  return {
+    ...actual,
+    forkWorker: mocks.forkWorker,
+    startDesktopFollowerTurnProgress: mocks.startDesktopFollowerTurnProgress,
+  };
 });
 
 vi.mock('../src/core/session-manager.js', async () => {
@@ -241,6 +246,7 @@ describe('ordinary ingress terminal failure → actionable notice', () => {
     mocks.getAvailableBots.mockResolvedValue([]);
     mocks.downloadResources.mockResolvedValue({ attachments: [], needLogin: false });
     mocks.sendCodexDesktopThreadTurn.mockResolvedValue({ ownerClientId: 'desktop-owner' });
+    mocks.startDesktopFollowerTurnProgress.mockResolvedValue('handled');
     activeSessions.clear();
     const bot = registerBot({
       larkAppId: APP,
@@ -277,6 +283,7 @@ describe('ordinary ingress terminal failure → actionable notice', () => {
       input: expect.objectContaining({ text: '继续修复这个问题' }),
     });
     expect(mocks.forkWorker).not.toHaveBeenCalled();
+    expect(mocks.startDesktopFollowerTurnProgress).toHaveBeenCalledWith(ds, 'om_desktop_turn');
   });
 
   it('Desktop offline rejects visibly without queueing or spawning a competing worker', async () => {

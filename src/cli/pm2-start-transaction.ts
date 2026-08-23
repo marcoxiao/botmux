@@ -19,6 +19,26 @@ function assertUniqueConfiguredNames(names: string[]): void {
   }
 }
 
+/** `pm2 start ecosystem.config` restarts a same-name dormant row with the
+ * row's old script path. Refuse that cross-checkout surprise and require the
+ * existing authoritative restart transaction to replace the fleet. */
+export function assertConfiguredPm2FleetSource(
+  operation: string,
+  entries: FleetProcessEntry[],
+  expectedExecPaths: ReadonlyMap<string, string>,
+): void {
+  const mismatches = entries.filter(entry => {
+    const expected = expectedExecPaths.get(entry.name);
+    return expected !== undefined && entry.execPath !== expected;
+  });
+  if (mismatches.length === 0) return;
+  throw new Error(
+    `[${operation}] PM2 row(s) belong to a different checkout: `
+    + mismatches.map(entry => `${entry.name}:${entry.execPath ?? 'unknown'}`).join(', ')
+    + '; run botmux restart so PM2 replaces their script definitions',
+  );
+}
+
 function assertProjectionIdentities(
   operation: string,
   entries: FleetProcessEntry[],

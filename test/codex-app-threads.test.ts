@@ -5,11 +5,20 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   generateCodexAppThreadTitle,
   listCodexAppHooks,
+  normalizeCodexAppThreadLabel,
   setCodexAppThreadName,
 } from '../src/services/codex-app-threads.js';
 
 const FAKE_CODEX = resolve('test/fixtures/fake-codex-app-server.mjs');
 const tempDirs: string[] = [];
+
+describe('normalizeCodexAppThreadLabel', () => {
+  it('decodes UI whitespace entities without interpreting arbitrary HTML', () => {
+    expect(normalizeCodexAppThreadLabel('  &#x20;还是提示关闭？  ')).toBe('还是提示关闭？');
+    expect(normalizeCodexAppThreadLabel('A&#32;B&nbsp;C')).toBe('A B C');
+    expect(normalizeCodexAppThreadLabel('&lt;script&gt;')).toBe('&lt;script&gt;');
+  });
+});
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });

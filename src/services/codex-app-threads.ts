@@ -345,8 +345,12 @@ class CodexAppServerProbe {
       threadId,
       includeTurns: false,
     }), timeoutMs, 'thread/read');
-    const name = typeof result?.thread?.name === 'string' ? result.thread.name.trim() : '';
-    const preview = typeof result?.thread?.preview === 'string' ? result.thread.preview.trim() : '';
+    const name = typeof result?.thread?.name === 'string'
+      ? normalizeCodexAppThreadLabel(result.thread.name)
+      : '';
+    const preview = typeof result?.thread?.preview === 'string'
+      ? normalizeCodexAppThreadLabel(result.thread.preview)
+      : '';
     const updatedAt = typeof result?.thread?.updatedAt === 'number' ? result.thread.updatedAt : undefined;
     return {
       ...(name ? { name } : {}),
@@ -515,6 +519,20 @@ function stringifyStatus(status: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Codex Desktop can surface leading spaces from rich-text input as HTML
+ * whitespace entities in thread names/previews. Decode only whitespace — not
+ * general HTML — so labels are readable without turning untrusted text into
+ * markup.
+ */
+export function normalizeCodexAppThreadLabel(value: string): string {
+  return value
+    .replace(/(?:&#x20;|&#32;|&nbsp;)/gi, ' ')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function normalizeThread(raw: JsonObject): CodexAppThreadSummary | null {
   const threadId = typeof raw.id === 'string' ? raw.id : undefined;
   const cwd = typeof raw.cwd === 'string' ? raw.cwd : undefined;
@@ -522,8 +540,9 @@ function normalizeThread(raw: JsonObject): CodexAppThreadSummary | null {
 
   const updatedAt = typeof raw.updatedAt === 'number' ? raw.updatedAt : undefined;
   const createdAt = typeof raw.createdAt === 'number' ? raw.createdAt : undefined;
-  const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : undefined;
-  const preview = typeof raw.preview === 'string' ? raw.preview.trim() : '';
+  const normalizedName = typeof raw.name === 'string' ? normalizeCodexAppThreadLabel(raw.name) : '';
+  const name = normalizedName || undefined;
+  const preview = typeof raw.preview === 'string' ? normalizeCodexAppThreadLabel(raw.preview) : '';
   const source = typeof raw.source === 'string' ? raw.source : undefined;
 
   return {

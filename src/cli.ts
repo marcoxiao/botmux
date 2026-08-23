@@ -171,6 +171,7 @@ import {
 import {
   assertDaemonPm2GracefulExitPolicy,
   assertConfiguredPm2FleetReady,
+  assertConfiguredPm2FleetSource,
   assertExactAttestedDaemonSet,
   classifyStartBotFleetAdmission,
   normalizeRawPm2StopExitCodes,
@@ -2830,6 +2831,16 @@ async function cmdStart(): Promise<void> {
       const configuredNames = configuredCoreProcessNames(lockedBots);
       const verifyTimeoutMs = pm2StartVerifyTimeoutMs(configuredNames.length);
       const cfg = ecosystemConfig(lockedBots);
+      const daemonEntry = join(PKG_ROOT, 'dist', 'index-daemon.js');
+      const dashboardEntry = join(PKG_ROOT, 'dist', 'index-dashboard.js');
+      assertConfiguredPm2FleetSource(
+        'start',
+        currentProjection,
+        new Map(configuredNames.map(name => {
+          const script = name === 'botmux-dashboard' ? dashboardEntry : daemonEntry;
+          return [name, existsSync(script) ? realpathSync(script) : resolve(script)];
+        })),
+      );
       const liveEntries = currentProjection.filter(isLivePm2Entry);
       if (liveEntries.length > 0) {
         try {
@@ -2934,6 +2945,9 @@ function toBotmuxPm2ProcessEntry(app: any): BotmuxPm2ProcessEntry {
   const rawStopExitCodes = app?.pm2_env?.stop_exit_codes;
   const pmId = parseCanonicalPm2Id(app);
   const exitCode = parsePm2Integer(app?.pm2_env?.exit_code);
+  const rawExecPath = typeof app?.pm2_env?.pm_exec_path === 'string'
+    ? app.pm2_env.pm_exec_path
+    : undefined;
   return {
     name: String(app.name),
     ...(pmId !== undefined ? { pmId } : {}),
@@ -2943,6 +2957,9 @@ function toBotmuxPm2ProcessEntry(app: any): BotmuxPm2ProcessEntry {
     autorestart: app?.pm2_env?.autorestart,
     stopExitCodes: normalizeRawPm2StopExitCodes(rawStopExitCodes),
     ...(exitCode !== undefined ? { exitCode } : {}),
+    ...(rawExecPath
+      ? { execPath: existsSync(rawExecPath) ? realpathSync(rawExecPath) : resolve(rawExecPath) }
+      : {}),
   };
 }
 

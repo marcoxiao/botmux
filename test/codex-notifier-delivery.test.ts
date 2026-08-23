@@ -49,7 +49,9 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function createHarness() {
+function createHarness(
+  tryProgressDelivery?: (event: CodexTaskCompletedEvent, card: string, targetChatId?: string) => Promise<string | undefined>,
+) {
   const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-delivery-'));
   tempDirs.push(dir);
   const routeStore = new CodexNotifierTopicRouteStore(join(dir, 'routes.json'));
@@ -64,11 +66,31 @@ function createHarness() {
     replyMessage,
     sendUserMessage,
     platform: 'darwin',
+    tryProgressDelivery,
   });
   return { coordinator, routeStore, sendMessage, replyMessage, sendUserMessage };
 }
 
 describe('Codex notifier delivery coordinator', () => {
+  it('updates an existing plugin progress card instead of posting a second completion card', async () => {
+    const tryProgressDelivery = vi.fn(async () => 'om_progress');
+    const { coordinator, sendMessage, replyMessage, sendUserMessage } = createHarness(tryProgressDelivery);
+    const completion = event('desktop-follower');
+
+    await expect(coordinator.deliver(completion, 'oc_workbench')).resolves.toEqual({
+      destination: 'group',
+      messageId: 'om_progress',
+    });
+    expect(tryProgressDelivery).toHaveBeenCalledWith(
+      completion,
+      expect.stringContaining('完成 desktop-follower'),
+      'oc_workbench',
+    );
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(replyMessage).not.toHaveBeenCalled();
+    expect(sendUserMessage).not.toHaveBeenCalled();
+  });
+
   it('keeps the legacy owner DM path when targetChatId is absent', async () => {
     const { coordinator, sendMessage, sendUserMessage } = createHarness();
     const completion = event('dm');
