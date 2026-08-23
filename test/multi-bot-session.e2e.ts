@@ -22,7 +22,7 @@ vi.mock('../src/core/worker-pool.js', () => ({
 vi.mock('../src/core/session-manager.js', () => ({
   getSessionWorkingDir: vi.fn(() => '/tmp'),
   ensureSessionWhiteboard: vi.fn(),
-  buildNewTopicPrompt: vi.fn(() => 'mock-prompt'),
+  buildNewTopicCliInput: vi.fn(() => ({ content: 'mock-prompt' })),
   getAvailableBots: vi.fn(async () => []),
   rememberLastCliInput: vi.fn((ds: any, userPrompt: string, cliInput: string) => {
     ds.lastUserPrompt = userPrompt;
@@ -262,7 +262,11 @@ describe('Multi-bot card action allowedUsers', () => {
     // Simulate: Bot2 owns the session, card action arrives via Bot2
     const activeSessions = new Map<string, any>();
     activeSessions.set(sessionKey(MSG_ID_TOPIC_A, BOT2.appId), {
-      session: { sessionId: 'uuid-2', rootMessageId: MSG_ID_TOPIC_A },
+      session: {
+        sessionId: 'uuid-2',
+        rootMessageId: MSG_ID_TOPIC_A,
+        status: 'active',
+      },
       larkAppId: BOT2.appId,
       pendingRepo: true,
       pendingPrompt: 'test',
@@ -297,7 +301,11 @@ describe('Multi-bot card action allowedUsers', () => {
     // Session owned by Bot1 — stored with composite key
     const activeSessions = new Map<string, any>();
     activeSessions.set(sessionKey(MSG_ID_TOPIC_A, BOT1.appId), {
-      session: { sessionId: 'uuid-1', rootMessageId: MSG_ID_TOPIC_A },
+      session: {
+        sessionId: 'uuid-1',
+        rootMessageId: MSG_ID_TOPIC_A,
+        status: 'active',
+      },
       larkAppId: BOT1.appId,
       pendingRepo: true,
       pendingPrompt: 'test',

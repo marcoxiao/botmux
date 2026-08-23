@@ -52,6 +52,14 @@ const PTY_COLS = 300;
 const PTY_ROWS = 50;
 const TEST_PROMPT = 'just say the word PONG and nothing else';
 
+// This E2E launches the user's real Codex binary, so it also sees the installed
+// user-level BotMux notifier hook. Mark the child as BotMux-managed to exercise
+// PTY input without publishing the synthetic PONG turn to the real Feishu chat.
+const CODEX_TEST_ENV = {
+  ...process.env,
+  BOTMUX_SESSION_ID: 'codex-input-e2e',
+} as Record<string, string>;
+
 // Fixed trust pattern (matches both Claude Code and Codex)
 const TRUST_DIALOG_PATTERN = /Yes, I trust this folder|Yes, continue/;
 
@@ -109,7 +117,7 @@ describe('Codex first input submission', () => {
       cols: PTY_COLS,
       rows: PTY_ROWS,
       cwd: tmpDir!,
-      env: { ...process.env } as Record<string, string>,
+      env: CODEX_TEST_ENV,
     });
     proc.onData((data) => {
       chunks.push({
@@ -163,7 +171,7 @@ describe('Codex first input submission', () => {
       cols: PTY_COLS,
       rows: PTY_ROWS,
       cwd: tmpDir!,
-      env: { ...process.env } as Record<string, string>,
+      env: CODEX_TEST_ENV,
     });
 
     const cliAdapter = createCodexAdapter();
@@ -254,7 +262,7 @@ describe('Codex first input submission', () => {
       cols: PTY_COLS,
       rows: PTY_ROWS,
       cwd: '/tmp',
-      env: { ...process.env } as Record<string, string>,
+      env: CODEX_TEST_ENV,
     });
 
     const cliAdapter = createCodexAdapter();
