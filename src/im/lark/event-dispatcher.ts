@@ -2350,9 +2350,9 @@ export async function dispatchPluginTopicMessage(
     : threadId;
   if (typeof messageIdentity !== 'string' || !messageIdentity) return false;
   const claim = resolveClaim?.(input.larkAppId, messageIdentity);
-  if (!claim && !rawRootMessageId && hasClaimedChat?.(input.larkAppId, input.chatId)) {
+  if (!claim && hasClaimedChat?.(input.larkAppId, input.chatId)) {
     logger.warn(
-      `[plugin-message] rootless topic alias ${threadId.substring(0, 12)} is not resolved; `
+      `[plugin-message] topic identity ${messageIdentity.substring(0, 12)} is not resolved; `
       + `consuming in claimed chat ${input.chatId.substring(0, 12)} without native fallback`,
     );
     return true;

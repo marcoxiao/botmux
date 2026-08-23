@@ -90,4 +90,16 @@ describe('Lark plugin topic message routing', () => {
     }, handle, () => undefined, () => true)).resolves.toBe(true);
     expect(handle).not.toHaveBeenCalled();
   });
+
+  it('fails closed for an unresolved rooted reply inside an exclusive plugin chat', async () => {
+    const handle = vi.fn(async () => false);
+
+    await expect(dispatchPluginTopicMessage(
+      base,
+      handle,
+      () => undefined,
+      () => true,
+    )).resolves.toBe(true);
+    expect(handle).not.toHaveBeenCalled();
+  });
 });
