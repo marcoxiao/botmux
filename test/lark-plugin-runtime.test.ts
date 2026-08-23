@@ -68,6 +68,80 @@ describe('lark plugin runtime', () => {
     await expect(loadLarkPlugins([])).resolves.toEqual([]);
   });
 
+  it('loads a message-only contribution and stops after the first claim', async () => {
+    installPlugin('observer', `
+      module.exports = {
+        schemaVersion: 1,
+        actions: [],
+        handleMessage: async (context) => {
+          globalThis.__observerMessage = context;
+          return { handled: false };
+        },
+      };
+    `);
+    installPlugin('desktop-handoff', `
+      module.exports = {
+        schemaVersion: 1,
+        actions: [],
+        handleMessage: async (context, host) => {
+          globalThis.__desktopMessage = { context, host };
+          return { handled: true };
+        },
+      };
+    `);
+    installPlugin('unreachable', `
+      module.exports = {
+        schemaVersion: 1,
+        actions: [],
+        handleMessage: async () => {
+          globalThis.__unreachableMessage = true;
+          return { handled: true };
+        },
+      };
+    `);
+    const dispatcher = createLarkPluginDispatcher(
+      await loadLarkPlugins(['observer', 'desktop-handoff', 'unreachable']),
+      (pluginId, dispatchContext) => ({ pluginId, dispatchContext }),
+    );
+    const context = {
+      larkAppId: 'cli_bot',
+      chatId: 'oc_workbench',
+      messageId: 'om_input',
+      rootMessageId: 'om_root',
+      senderOpenId: 'ou_owner',
+      text: '从飞书继续',
+    };
+
+    await expect(dispatcher.dispatchMessage(context)).resolves.toEqual({ handled: true });
+    expect((globalThis as any).__observerMessage).toEqual(context);
+    expect((globalThis as any).__desktopMessage).toEqual({
+      context,
+      host: { pluginId: 'desktop-handoff', dispatchContext: { kind: 'message' } },
+    });
+    expect((globalThis as any).__unreachableMessage).toBeUndefined();
+    delete (globalThis as any).__observerMessage;
+    delete (globalThis as any).__desktopMessage;
+  });
+
+  it('does not swallow a message handler error and accidentally fall back', async () => {
+    installPlugin('desktop-handoff', `
+      module.exports = {
+        schemaVersion: 1,
+        actions: [],
+        handleMessage: async () => { throw new Error('desktop_ipc_failed'); },
+      };
+    `);
+    const dispatcher = createLarkPluginDispatcher(
+      await loadLarkPlugins(['desktop-handoff']),
+      () => ({}),
+    );
+
+    await expect(dispatcher.dispatchMessage({
+      larkAppId: 'cli_bot', chatId: 'oc_workbench', messageId: 'om_input',
+      rootMessageId: 'om_root', senderOpenId: 'ou_owner', text: '继续',
+    })).rejects.toThrow('desktop_ipc_failed');
+  });
+
   it.each([
     ['bad-schema', `module.exports = { schemaVersion: 2, actions: [], handleLocalEvent: async () => ({}) };`, 'invalid_lark_plugin_schema:bad-schema'],
     ['missing-handlers', `module.exports = { schemaVersion: 1, actions: [] };`, 'invalid_lark_plugin_handlers:missing-handlers'],

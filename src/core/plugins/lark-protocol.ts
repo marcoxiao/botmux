@@ -9,6 +9,15 @@ export interface LarkCardActionContext {
   larkAppId: string;
 }
 
+export interface LarkPluginMessageContext {
+  larkAppId: string;
+  chatId: string;
+  messageId: string;
+  rootMessageId: string;
+  senderOpenId: string;
+  text: string;
+}
+
 export interface LarkCardAction {
   operator?: {
     open_id?: string;
@@ -46,6 +55,7 @@ export interface LarkSharedAdoptRequest {
 
 export type LarkPluginHostDispatchContext =
   | { kind: 'local-event' }
+  | { kind: 'message' }
   | {
       kind: 'card-action';
       operatorOpenId?: string;
@@ -90,6 +100,10 @@ export interface LarkPluginV1 {
     context: LarkCardActionContext,
     host: LarkPluginHost,
   ): Promise<unknown>;
+  handleMessage?(
+    context: LarkPluginMessageContext,
+    host: LarkPluginHost,
+  ): Promise<{ handled: boolean }>;
 }
 
 export interface LoadedLarkPlugin {

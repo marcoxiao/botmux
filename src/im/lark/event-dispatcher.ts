@@ -73,6 +73,7 @@ import type { VcMeetingPushContext, VcMeetingPushEventKind } from '../../vc-agen
 import type { VcMeetingImTurnOrigin } from '../../types.js';
 import { DEFAULT_GRANT_DURATION_MS, DEFAULT_GRANT_QUOTA } from '../../services/grant-policy.js';
 import { readPeerCrossRef, writePeerCrossRef } from '../../services/peer-cross-ref-store.js';
+import type { LarkPluginMessageContext } from '../../core/plugins/lark-protocol.js';
 
 // 大厅回执互教的防环闸：每进程对同一打卡者只回一次（见 hall swallow 分支）。
 const hallEchoReplied = new Set<string>();
@@ -2278,6 +2279,9 @@ export interface EventHandlers {
   handleCardAction: (data: any, larkAppId: string) => Promise<any>;
   handleNewTopic: (data: any, ctx: RoutingContext) => Promise<void>;
   handleThreadReply: (data: any, ctx: RoutingContext) => Promise<void>;
+  /** Give enabled plugins first refusal over an allowed human reply inside a
+   *  real Lark topic. A claimed message never falls through to native routing. */
+  handlePluginMessage?: (context: LarkPluginMessageContext) => Promise<boolean>;
   /** 主动开工 — 场景①: fired when this bot is added to a chat
    *  (`im.chat.member.bot.added_v1`). The daemon decides whether to auto-start
    *  based on the bot's `autoStartOnGroupJoin` toggle + allowedUser membership.
@@ -2312,6 +2316,36 @@ export interface EventHandlers {
   /** 授权成功后重放之前被拦截的消息，让用户无需再 @ 一遍。
    *  由 startLarkEventDispatcher 内部注入，daemon 的 cardDeps.replayGrantedMessage 调用。 */
   replayMessageEvent?: (data: any) => void;
+}
+
+export async function dispatchPluginTopicMessage(
+  input: {
+    larkAppId: string;
+    chatId: string;
+    messageId: string;
+    message: any;
+    senderOpenId?: string;
+    talkAllowed: boolean;
+  },
+  handle?: (context: LarkPluginMessageContext) => Promise<boolean>,
+): Promise<boolean> {
+  if (!handle || !input.talkAllowed || !input.senderOpenId) return false;
+  const rootMessageId = input.message?.root_id;
+  const threadId = input.message?.thread_id;
+  if (typeof rootMessageId !== 'string' || !rootMessageId) return false;
+  if (typeof threadId !== 'string' || !threadId) return false;
+  const routingText = extractMessageTextForRouting(input.message);
+  const text = routingText
+    ? stripLeadingMentions(routingText.trim(), input.message?.mentions ?? []).trim()
+    : '';
+  return handle({
+    larkAppId: input.larkAppId,
+    chatId: input.chatId,
+    messageId: input.messageId,
+    rootMessageId,
+    senderOpenId: input.senderOpenId,
+    text,
+  });
 }
 
 /** 一条已通过订阅 + 触发范围 + 自触发过滤的文档评论，交给 daemon 投递。 */
@@ -3620,6 +3654,16 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         ? stripLeadingMentions(routingText.trim(), message?.mentions ?? []).trim()
         : '';
       const isControlCommand = strippedRoutingText.startsWith('/');
+      if (await dispatchPluginTopicMessage({
+        larkAppId,
+        chatId,
+        messageId,
+        message,
+        senderOpenId,
+        talkAllowed: isAllowed,
+      }, handlers.handlePluginMessage)) {
+        return;
+      }
       let pairedForwardSeed;
       let stalePendingSeed;
       // Require isAllowed before pairing: a root-linked clarification from a

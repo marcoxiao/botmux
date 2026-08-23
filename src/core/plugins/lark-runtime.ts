@@ -6,6 +6,7 @@ import type {
   LarkCardAction,
   LarkCardActionContext,
   LarkLocalEventContext,
+  LarkPluginMessageContext,
   LarkPluginHost,
   LarkPluginHostDispatchContext,
   LarkPluginV1,
@@ -28,6 +29,7 @@ function validateLarkPlugin(pluginId: string, exported: unknown): LarkPluginV1 {
   if (
     typeof candidate.handleLocalEvent !== 'function'
     && typeof candidate.handleCardAction !== 'function'
+    && typeof candidate.handleMessage !== 'function'
   ) {
     throw new Error(`invalid_lark_plugin_handlers:${pluginId}`);
   }
@@ -47,6 +49,7 @@ function validateLarkPlugin(pluginId: string, exported: unknown): LarkPluginV1 {
     actions: [...candidate.actions],
     ...(candidate.handleLocalEvent ? { handleLocalEvent: candidate.handleLocalEvent } : {}),
     ...(candidate.handleCardAction ? { handleCardAction: candidate.handleCardAction } : {}),
+    ...(candidate.handleMessage ? { handleMessage: candidate.handleMessage } : {}),
   };
 }
 
@@ -81,6 +84,7 @@ export interface LarkPluginDispatcher {
     data: LarkCardAction,
     context: LarkCardActionContext,
   ): Promise<{ handled: false } | { handled: true; result: unknown }>;
+  dispatchMessage(context: LarkPluginMessageContext): Promise<{ handled: boolean }>;
 }
 
 export function createLarkPluginDispatcher(
@@ -120,6 +124,18 @@ export function createLarkPluginDispatcher(
         }),
       );
       return { handled: true, result };
+    },
+    async dispatchMessage(context) {
+      for (const loaded of plugins) {
+        const handler = loaded.plugin.handleMessage;
+        if (!handler) continue;
+        const result = await handler(
+          context,
+          hostForPlugin(loaded.pluginId, { kind: 'message' }),
+        );
+        if (result.handled) return { handled: true };
+      }
+      return { handled: false };
     },
   };
 }

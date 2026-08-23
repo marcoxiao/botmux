@@ -22184,6 +22184,10 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       ),
       handleNewTopic: (data, ctx) => handleNewTopic(data, ctx),
       handleThreadReply: (data, ctx) => handleThreadReply(data, ctx),
+      handlePluginMessage: async (context) => {
+        const { dispatcher } = await loadDaemonLarkPluginDispatcher(context.larkAppId);
+        return (await dispatcher.dispatchMessage(context)).handled;
+      },
       handleBotAdded: (chatId, operatorOpenId, appId) => withBotTurnAdmission(
         appId,
         () => handleBotAdded(chatId, operatorOpenId, appId),
