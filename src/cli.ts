@@ -13702,7 +13702,7 @@ function printPluginUsage(): void {
   botmux plugin uninstall <plugin-id> [--force]
   botmux plugin enable <plugin-id> [--bot <name|index|all>]
   botmux plugin disable <plugin-id> [--bot <name|index|all>]
-  botmux plugin emit <plugin-id> --bot <process-name|app-id>  # JSON 从 stdin 读取
+  botmux plugin emit <plugin-id> --bot <process-name|app-id> [--best-effort]  # JSON 从 stdin 读取
   botmux <plugin-command> [args...]
   botmux plugin service status
   botmux plugin service start [plugin-id|--all]
@@ -13796,6 +13796,7 @@ async function cmdPlugin(args: string[]): Promise<void> {
 
   if (sub === 'emit') {
     const pluginId = requirePluginId(args[1]);
+    const bestEffort = args.includes('--best-effort');
     assertPluginInstalled(pluginId);
     const botSelector = findArgValue(args, '--bot');
     if (!botSelector) {
@@ -13839,24 +13840,33 @@ async function cmdPlugin(args: string[]): Promise<void> {
       return;
     }
 
-    const daemon = findDaemon(bot.larkAppId);
-    if (!daemon) {
-      console.error(`❌ Bot(${botSelector}) daemon 未运行。`);
+    const {
+      emitPluginLocalEvent,
+      emitPluginLocalEventBestEffort,
+    } = await import('./core/plugins/local-event-client.js');
+    const envelope = {
+      pluginId,
+      targetBotAppId: bot.larkAppId,
+      managedSession: Boolean(process.env.BOTMUX_SESSION_ID?.trim()),
+      event,
+    };
+    try {
+      const result = bestEffort
+        ? await emitPluginLocalEventBestEffort(envelope, {
+            onDrop: (error) => {
+              if (process.env.BOTMUX_DEBUG) {
+                console.error(`plugin event dropped: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            },
+          })
+        : await emitPluginLocalEvent(envelope);
+      if (result.status !== 'dropped') {
+        console.log(JSON.stringify({ ok: true, status: result.status }));
+      }
+    } catch (error) {
+      console.error(`❌ 插件事件投递失败: ${error instanceof Error ? error.message : String(error)}`);
       process.exitCode = 1;
-      return;
     }
-    const response = await fetchDaemonIpc(daemon.ipcPort, '/api/plugin-events', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ pluginId, targetBotAppId: bot.larkAppId, event }),
-    });
-    const responseText = await response.text();
-    if (!response.ok) {
-      console.error(`❌ 插件事件投递失败 (${response.status}): ${responseText || response.statusText}`);
-      process.exitCode = 1;
-      return;
-    }
-    console.log(responseText || JSON.stringify({ ok: true, status: 'accepted' }));
     return;
   }
 

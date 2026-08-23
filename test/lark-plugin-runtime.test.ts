@@ -3,7 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pluginRuntimeDir } from '../src/core/plugins/paths.js';
-import { loadLarkPlugins } from '../src/core/plugins/lark-runtime.js';
+import {
+  createLarkPluginDispatcher,
+  loadLarkPlugins,
+} from '../src/core/plugins/lark-runtime.js';
 import { upsertInstalledPlugin } from '../src/services/plugin-registry-store.js';
 
 describe('lark plugin runtime', () => {
@@ -86,5 +89,54 @@ describe('lark plugin runtime', () => {
 
     await expect(loadLarkPlugins(['first', 'second']))
       .rejects.toThrow('duplicate_lark_plugin_action:desktop_handoff.takeover:first,second');
+  });
+
+  it('dispatches a local event only to the explicitly addressed loaded plugin', async () => {
+    installPlugin('desktop-handoff', `
+      module.exports = {
+        schemaVersion: 1,
+        actions: [],
+        handleLocalEvent: async (event, context, host) => ({ event, context, host }),
+      };
+    `);
+    const dispatcher = createLarkPluginDispatcher(
+      await loadLarkPlugins(['desktop-handoff']),
+      pluginId => ({ pluginId }),
+    );
+
+    await expect(dispatcher.dispatchLocalEvent(
+      'desktop-handoff',
+      { type: 'task.completed' },
+      { larkAppId: 'cli_bot', managedSession: false },
+    )).resolves.toEqual({
+      event: { type: 'task.completed' },
+      context: { larkAppId: 'cli_bot', managedSession: false },
+      host: { pluginId: 'desktop-handoff' },
+    });
+    await expect(dispatcher.dispatchLocalEvent(
+      'disabled-plugin',
+      {},
+      { larkAppId: 'cli_bot', managedSession: false },
+    )).rejects.toThrow('lark_plugin_not_enabled:disabled-plugin');
+  });
+
+  it('fails closed when an addressed plugin has no local event handler', async () => {
+    installPlugin('action-only', `
+      module.exports = {
+        schemaVersion: 1,
+        actions: ['action_only.click'],
+        handleCardAction: async () => ({}),
+      };
+    `);
+    const dispatcher = createLarkPluginDispatcher(
+      await loadLarkPlugins(['action-only']),
+      () => ({}),
+    );
+
+    await expect(dispatcher.dispatchLocalEvent(
+      'action-only',
+      {},
+      { larkAppId: 'cli_bot', managedSession: false },
+    )).rejects.toThrow('lark_plugin_local_event_handler_not_found:action-only');
   });
 });

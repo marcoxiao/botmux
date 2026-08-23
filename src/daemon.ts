@@ -388,6 +388,8 @@ import {
 import type { WorkflowDaemonMutation } from './workflows/v3/daemon-ipc-client.js';
 import type { SavedWorkflowActorContext } from './workflows/v3/library-service.js';
 import { resolveEffectivePluginIds } from './core/plugins/effective.js';
+import { createLarkPluginDispatcher, loadLarkPlugins } from './core/plugins/lark-runtime.js';
+import { handlePluginLocalEventIngress } from './core/plugins/local-event-ingress.js';
 import {
   buildCodexNotifierResultCard,
   CODEX_NOTIFIER_PLUGIN_ID,
@@ -6362,7 +6364,7 @@ ipcRoute('POST', '/api/codex-notifier/events', async (req, res) => {
   );
 });
 
-// 旧独立插件的兼容入口保留一个迁移周期，只负责排空已经落盘的历史 outbox。
+// Host-authenticated local events for enabled Lark plugin contributions.
 ipcRoute('POST', '/api/plugin-events', async (req, res) => {
   if (!isTrustedHostIpcRequest(req)) {
     return jsonRes(res, 403, { ok: false, error: 'trusted_host_required' });
@@ -6380,21 +6382,30 @@ ipcRoute('POST', '/api/plugin-events', async (req, res) => {
     }
     return jsonRes(res, 400, { ok: false, error: 'bad_json' });
   }
-  if (!hasExactSafeJsonKeys(raw, ['pluginId', 'targetBotAppId', 'event'])) {
-    return jsonRes(res, 400, { ok: false, error: 'bad_body' });
+  const enabledPluginIds = resolveEffectivePluginIds(
+    getBot(larkAppId).config,
+    readGlobalConfig(),
+  );
+  let dispatcher;
+  try {
+    dispatcher = createLarkPluginDispatcher(
+      await loadLarkPlugins(enabledPluginIds),
+      () => ({}),
+    );
+  } catch (error) {
+    logger.warn(`[plugins:lark] failed to load contributions: ${error instanceof Error ? error.message : String(error)}`);
+    return jsonRes(res, 503, { ok: false, error: 'plugin_runtime_unavailable' });
   }
-  const {
-    pluginId,
-    targetBotAppId,
-    event: rawEvent,
-  } = raw;
-  if (pluginId !== CODEX_NOTIFIER_PLUGIN_ID) {
-    return jsonRes(res, 400, { ok: false, error: 'unsupported_plugin' });
-  }
-  if (targetBotAppId !== larkAppId) {
-    return jsonRes(res, 403, { ok: false, error: 'target_bot_mismatch' });
-  }
-  return respondCodexNotifierIngress(res, larkAppId, rawEvent, pluginId);
+  const result = await handlePluginLocalEventIngress(raw, {
+    larkAppId,
+    enabledPluginIds,
+    dispatch: (pluginId, event, context) =>
+      dispatcher.dispatchLocalEvent(pluginId, event, context),
+    onError: (pluginId, error) => logger.warn(
+      `[plugins:lark] local event failed plugin=${pluginId}: ${error instanceof Error ? error.message : String(error)}`,
+    ),
+  });
+  return jsonRes(res, result.statusCode, result.body);
 });
 
 // ─── hooks emit 转发端点 ────────────────────────────────────────────────────

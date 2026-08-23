@@ -2,7 +2,11 @@ import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { pluginRuntimeDir, resolvePluginPath } from './paths.js';
 import { orderedPluginRecords } from './runtime.js';
-import type { LarkPluginV1, LoadedLarkPlugin } from './lark-protocol.js';
+import type {
+  LarkLocalEventContext,
+  LarkPluginV1,
+  LoadedLarkPlugin,
+} from './lark-protocol.js';
 
 const ACTION_ID_PATTERN = /^[a-z][a-z0-9_.:-]{0,127}$/;
 
@@ -66,4 +70,30 @@ export async function loadLarkPlugins(pluginIds: readonly string[]): Promise<Loa
     loaded.push({ pluginId: record.id, plugin });
   }
   return loaded;
+}
+
+export interface LarkPluginDispatcher {
+  dispatchLocalEvent(
+    pluginId: string,
+    event: unknown,
+    context: LarkLocalEventContext,
+  ): Promise<unknown>;
+}
+
+export function createLarkPluginDispatcher(
+  plugins: readonly LoadedLarkPlugin[],
+  hostForPlugin: (pluginId: string) => unknown,
+): LarkPluginDispatcher {
+  const byId = new Map(plugins.map(entry => [entry.pluginId, entry]));
+  return {
+    async dispatchLocalEvent(pluginId, event, context) {
+      const loaded = byId.get(pluginId);
+      if (!loaded) throw new Error(`lark_plugin_not_enabled:${pluginId}`);
+      const handler = loaded.plugin.handleLocalEvent;
+      if (!handler) {
+        throw new Error(`lark_plugin_local_event_handler_not_found:${pluginId}`);
+      }
+      return handler(event, context, hostForPlugin(pluginId));
+    },
+  };
 }

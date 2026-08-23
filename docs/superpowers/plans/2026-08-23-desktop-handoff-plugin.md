@@ -22,7 +22,7 @@ BotMux Core：
 - `src/core/plugins/materializer.ts`：在启用快照中展示 `lark` 能力。
 - `src/im/lark/card-handler.ts`：在内建动作前委托唯一的插件 action。
 - `src/daemon.ts`：组装当前 Bot 的 Lark Host，并把现有 `/api/plugin-events` 泛化。
-- `src/cli.ts`：复用现有 `plugin emit`；让插件 CLI 命令拿到受限的本地事件发送能力。
+- `src/cli.ts`：直接复用现有 `plugin emit`，增加 Hook 使用的 best-effort 模式。
 - `test/lark-plugin-runtime.test.ts`：协议、冲突、启用和 fail-closed 测试。
 - `test/plugin-local-event-ingress.test.ts`：Host HMAC、目标 Bot 和启用范围测试。
 - `test/plugin-card-action-dispatch.test.ts`：动作路由与未处理回落测试。
@@ -96,9 +96,12 @@ Commit: `feat(plugins): add generic lark contribution`
 
 **Files:**
 - Modify: `src/core/plugins/runtime.ts`
+- Create: `src/core/plugins/local-event-ingress.ts`
+- Create: `src/core/plugins/local-event-client.ts`
 - Modify: `src/cli.ts`
 - Modify: `src/daemon.ts`
 - Create: `test/plugin-local-event-ingress.test.ts`
+- Create: `test/plugin-local-event-client.test.ts`
 - Modify: `test/plugin-manifest-store.test.ts`
 
 - [ ] **Step 1: 写失败测试**
@@ -110,7 +113,7 @@ expect(disabledPluginResponse.body.error).toBe('plugin_not_enabled');
 expect(wrongBotResponse.body.error).toBe('target_bot_mismatch');
 ```
 
-同时固定插件 CLI handler 可以拿到调用方注入的 `emitLocalEvent`，但不能覆盖 `config`、`resolve` 等基础安全 API。
+同时固定 `plugin emit --best-effort` 在 daemon 离线时不阻塞 Codex Hook；普通 `plugin emit` 仍返回非零，避免人工调试时静默失败。
 
 - [ ] **Step 2: 运行失败测试**
 
@@ -125,10 +128,11 @@ type PluginLocalEventEnvelope = {
   pluginId: string;
   targetBotAppId: string;
   event: unknown;
+  managedSession: boolean;
 };
 ```
 
-复用现有 Host HMAC、64 KiB 上限和 `plugin emit`。daemon 根据当前 Bot 的 effective plugin IDs 加载贡献，只调用 envelope 指定且已启用的插件。未知/禁用插件 fail closed，不回退内建 notifier。
+复用现有 Host HMAC、64 KiB 上限和 `plugin emit`。`managedSession` 由 Host CLI 根据自身进程环境生成，插件用它过滤 BotMux 自己创建的 Codex 任务。daemon 根据当前 Bot 的 effective plugin IDs 加载贡献，只调用 envelope 指定且已启用的插件。未知/禁用插件 fail closed，不回退内建 notifier。
 
 - [ ] **Step 4: 运行测试并提交**
 
@@ -209,14 +213,10 @@ Commit: `feat(lark): expose native shared adopt to plugins`
 - Create: `/Users/bytedance/AiProjects/botmux-plugin-desktop-handoff/src/store.ts`
 - Create: `/Users/bytedance/AiProjects/botmux-plugin-desktop-handoff/src/card.ts`
 - Create: `/Users/bytedance/AiProjects/botmux-plugin-desktop-handoff/src/lark/index.ts`
-- Create: `/Users/bytedance/AiProjects/botmux-plugin-desktop-handoff/src/cli/index.ts`
-- Create: `/Users/bytedance/AiProjects/botmux-plugin-desktop-handoff/src/cli/commands.json`
-- Create: `/Users/bytedance/AiProjects/botmux-plugin-desktop-handoff/scripts/copy-static.mjs`
 - Create: `/Users/bytedance/AiProjects/botmux-plugin-desktop-handoff/test/event.test.ts`
 - Create: `/Users/bytedance/AiProjects/botmux-plugin-desktop-handoff/test/codex-context.test.ts`
 - Create: `/Users/bytedance/AiProjects/botmux-plugin-desktop-handoff/test/store.test.ts`
 - Create: `/Users/bytedance/AiProjects/botmux-plugin-desktop-handoff/test/lark.test.ts`
-- Create: `/Users/bytedance/AiProjects/botmux-plugin-desktop-handoff/test/cli.test.ts`
 
 - [ ] **Step 1: 写插件纯逻辑失败测试**
 
@@ -241,13 +241,13 @@ export default {
 
 `UserPromptSubmit` 只记录确认过的用户问题；`Stop` 只接受 transcript 标记为 `source=vscode, originator=Codex Desktop` 的持久 thread。首次完成发送根 CardKit，后续同 thread 回复到该根话题；活跃 Shared Adopt 不再发送重复接管卡。
 
-构建脚本先运行 `tsc`，再由 `scripts/copy-static.mjs` 把 `src/cli/commands.json` 复制到 `dist/cli/commands.json`；不引入打包器。
+Codex Hook 命令直接配置为 `botmux plugin emit desktop-handoff --bot cli_aa9f099867385ccc --best-effort`，插件不再声明一层重复的 CLI contribution。
 
 - [ ] **Step 4: 构建并运行插件测试**
 
 Run: `pnpm test && pnpm build`
 
-Expected: PASS，`dist/lark/index.js`、`dist/cli/index.js` 和 `dist/cli/commands.json` 存在。
+Expected: PASS，`dist/lark/index.js` 存在。
 
 - [ ] **Step 5: 初始化独立 Git 仓库并提交**
 
@@ -273,7 +273,7 @@ Expected: Dashboard/CLI 显示插件已安装且只在 Codex Bot 启用。
 
 - [ ] **Step 2: 配置目标 Bot/工作台并替换 Hook**
 
-清空内建 `codexNotifier` 启用配置，插件配置固定目标 `larkAppId`、工作台 `chatId`；沿用 `botmux codex-watch-hook` 命令，由已启用插件 CLI handler 接管。Traex Bot 不启用本插件。
+清空内建 `codexNotifier` 启用配置，插件配置固定目标 `larkAppId`、工作台 `chatId`；Codex Hook 直接调用 `botmux plugin emit desktop-handoff --bot cli_aa9f099867385ccc --best-effort`。Traex Bot 不启用本插件。
 
 - [ ] **Step 3: 写清理后的失败测试**
 
