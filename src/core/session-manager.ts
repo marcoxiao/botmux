@@ -92,6 +92,7 @@ import { resolveEffectivePluginIds } from './plugins/effective.js';
 import { resolveTurnProgressPluginId } from './plugins/runtime.js';
 import { readSessionPluginManifest } from './plugins/session-manifest.js';
 import { isStructuredBridgeFallbackActive } from '../services/structured-bridge-clis.js';
+import { isSharedAdoptPersistedSession, isSharedAdoptSession } from './shared-adopt.js';
 
 export { getAttachmentsDir } from './attachment-path.js';
 
@@ -361,6 +362,11 @@ function armCliMismatchResweep(ds: DaemonSession): void {
 }
 
 async function closeActiveSessionIfCliMismatch(ds: DaemonSession): Promise<CliMismatchCloseResult> {
+  // A Codex App shared adopt deliberately runs the plain `codex` remote TUI
+  // even when this bot's normal/new-session runtime remains `codex-app`.
+  // That is not a bot configuration drift and must never trigger the ordinary
+  // "kill mismatched CLI" cleanup during daemon restore or a live config edit.
+  if (isSharedAdoptSession(ds)) return 'not_mismatched';
   const mismatch = sessionBotCliMismatch(ds);
   if (!mismatch) return 'not_mismatched';
 
@@ -474,7 +480,7 @@ export async function closeCliMismatchedSessionsForBot(
   for (const ds of [...registry.values()]) {
     if (ds.larkAppId !== larkAppId) continue;
     if (ds.session.queued) continue;
-    if (ds.adoptedFrom || ds.session.adoptedFrom || ds.session.title?.startsWith('Adopt:')) continue;
+    if (isSharedAdoptSession(ds) || ds.session.title?.startsWith('Adopt:')) continue;
     // Defense in depth: the dashboard toggle preflights the whole bot before
     // changing config. Never let a refused suspend fall through into
     // closeSession: close is explicit abandon, and a settings toggle is not.
@@ -519,7 +525,7 @@ export async function suspendActiveSessionsForBot(larkAppId: string): Promise<nu
   for (const ds of [...registry.values()]) {
     if (ds.larkAppId !== larkAppId) continue;
     if (ds.session.queued) continue;
-    if (ds.adoptedFrom || ds.session.adoptedFrom || ds.session.title?.startsWith('Adopt:')) continue;
+    if (isSharedAdoptSession(ds) || ds.session.title?.startsWith('Adopt:')) continue;
     // A settings helper is never an explicit abandon boundary. In particular,
     // suspendWorker intentionally refuses pending Codex App ownership; do not
     // reinterpret that refusal as permission to close and erase the FIFO.
@@ -2844,7 +2850,7 @@ export async function resumeSession(
   // Adopt sessions don't survive /close — the user's tmux pane and original
   // CLI pid have already moved on, and bringing the bridge back without a live
   // pane is meaningless.
-  if (session.title?.startsWith('Adopt:') || session.adoptedFrom) {
+  if (session.title?.startsWith('Adopt:') || isSharedAdoptPersistedSession(session)) {
     return { ok: false, error: 'adopt_unsupported' };
   }
 
@@ -2864,7 +2870,7 @@ export async function resumeSession(
     && !readDeferredTopicBinding(config.session.dataDir, latest.sessionId)) {
     return { ok: false as const, error: 'deferred_unmaterialized' as const };
   }
-  if (latest.title?.startsWith('Adopt:') || latest.adoptedFrom) {
+  if (latest.title?.startsWith('Adopt:') || isSharedAdoptPersistedSession(latest)) {
     return { ok: false as const, error: 'adopt_unsupported' as const };
   }
   session = latest;

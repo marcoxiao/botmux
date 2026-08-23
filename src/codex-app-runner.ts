@@ -14,6 +14,7 @@ import {
   type CodexVersion,
 } from './adapters/cli/codex-app-turn.js';
 import { RunnerControlWriter } from './adapters/cli/runner-control-channel.js';
+import { CODEX_APP_ACTIVE_WRITER_EXIT_CODE } from './services/codex-app-runner-protocol.js';
 import {
   CODEX_APP_CONTROL_BOOTSTRAP_ENV,
   CODEX_APP_CONTROL_FINAL_CHUNK_BYTES,
@@ -218,6 +219,16 @@ class AppServerRequestTimeoutError extends Error {
   constructor(readonly method: string, readonly timeoutMs: number) {
     super(`${method}: timed out after ${timeoutMs}ms; request acceptance is unknown`);
     this.name = 'AppServerRequestTimeoutError';
+  }
+}
+
+class CodexAppActiveWriterError extends Error {
+  constructor(readonly threadId: string, cause: unknown) {
+    super(
+      `thread ${threadId} already has an active writer: `
+      + `${String((cause as Error)?.message ?? cause)}`,
+    );
+    this.name = 'CodexAppActiveWriterError';
   }
 }
 
@@ -1503,6 +1514,14 @@ function isExplicitMissingThread(error: unknown): boolean {
     .test(error.message);
 }
 
+function isActiveWriterConflict(error: unknown): boolean {
+  if (!(error instanceof AppServerRpcError)) return false;
+  let dataText = '';
+  try { dataText = JSON.stringify(error.data ?? '').toLowerCase(); } catch { /* untrusted data */ }
+  const detail = `${error.message} ${dataText}`.toLowerCase();
+  return /thread.*already has an active writer|thread-store conflict.*active writer/.test(detail);
+}
+
 function isExplicitExpectedTurnInactive(error: unknown): boolean {
   return error instanceof AppServerRpcError
     && /(expected|active).*(turn).*(not active|no longer active|mismatch|does not match)|(turn).*(not active|no longer active).*(expected)/i
@@ -1568,6 +1587,7 @@ async function ensureThread(startupDeadlineAtMs?: number): Promise<string> {
       // A transport error or timeout is an ambiguous acceptance boundary. It
       // must never fork history by silently creating a fresh thread. Only an
       // explicit app-server "missing thread" rejection permits fallback.
+      if (isActiveWriterConflict(err)) throw new CodexAppActiveWriterError(threadId, err);
       if (!isExplicitMissingThread(err)) throw err;
       writeLine(`[codex-app] resume failed, starting a fresh thread: ${err?.message ?? err}`);
       threadId = undefined;
@@ -2550,6 +2570,13 @@ process.on('SIGINT', () => { void shutdown(130); });
 process.on('SIGHUP', () => { void shutdown(0); });
 
 main().catch(err => {
+  if (err instanceof CodexAppActiveWriterError) {
+    output.error(
+      `Codex App thread ${err.threadId} is currently owned by another app-server writer; `
+      + 'preserving the existing thread and waiting for that writer to release it.\n',
+    );
+    process.exit(CODEX_APP_ACTIVE_WRITER_EXIT_CODE);
+  }
   if (!runnerReady && err instanceof AppServerRequestTimeoutError) {
     output.error('Codex App startup timed out before the first signed runner state\n');
     process.exit(2);

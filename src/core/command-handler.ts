@@ -101,6 +101,7 @@ import { hasProtectedSessionMutationOwnership } from './session-mutation-guard.j
 import { withBotTurnMutation } from './bot-turn-mutation-gate.js';
 import { refreshSessionPluginManifest } from './plugins/session-manifest.js';
 import { rehomeReplyTargetState } from './reply-target.js';
+import { isSharedAdoptSession } from './shared-adopt.js';
 import {
   configuredRuntimeDisplayName,
   sessionConfiguredRuntimeDisplayName,
@@ -1348,6 +1349,49 @@ export async function handleCommand(
     switch (cmd) {
       case '/close': {
         if (ds) {
+          // Shared adopts never own the source conversation. Keep /close
+          // backwards-compatible as the quick "leave this BotMux share" action,
+          // but never present it as terminating the source App Server / tmux CLI.
+          if (isSharedAdoptSession(ds)) {
+            const targetSessionId = ds.session.sessionId;
+            const detached = await withBotTurnMutation(ds.larkAppId, async () => {
+              const current = [...activeSessions.values()].find(
+                candidate => candidate.session.sessionId === targetSessionId,
+              );
+              if (!current || !isSharedAdoptSession(current)) return 'missing' as const;
+              try {
+                const result = await closeWorkerPoolSession(targetSessionId);
+                if (!result.ok) return 'refused' as const;
+                return result.outcome === 'closed' ? 'closed' as const : 'residual' as const;
+              } catch {
+                return 'refused' as const;
+              }
+            });
+            if (detached === 'missing') {
+              await sessionReply(rootId, t('cmd.no_active_session', undefined, loc));
+              break;
+            }
+            if (detached === 'refused') {
+              await sessionReply(rootId, t('cmd.detach.failed', undefined, loc));
+              break;
+            }
+            if (detached === 'residual') {
+              await sessionReply(rootId, t('cmd.detach.residual', undefined, loc));
+              break;
+            }
+            await sessionReply(
+              rootId,
+              t(
+                ds.session.existingAppServerEndpoint
+                  ? 'cmd.detach.existing_app_server_success'
+                  : 'cmd.detach.success',
+                undefined,
+                loc,
+              ),
+            );
+            logger.info(`[${logTag}] /close treated as shared-adopt disconnect`);
+            break;
+          }
           const targetSessionId = ds.session.sessionId;
           const closed = await withBotTurnMutation(ds.larkAppId, async () => {
             // Re-resolve the exact session after all peer admissions drain. A
@@ -1486,14 +1530,17 @@ export async function handleCommand(
 
       case '/detach':
       case '/disconnect': {
-        // 文字版的"⏏ 断开"按钮：仅 adopt 会话适用——botmux 只是观察用户原本在
-        // 跑的 CLI，断开只清掉 botmux 这一侧的 worker / polling，绝不结束 CLI
-        // 进程本身。等价于 card-handler 里 `actionType === 'disconnect'` 那段。
+        // 文字版的"⏏ 断开"按钮：共享接入会话适用。
+        //   - tmux adopt：BotMux 停止观察外部终端，不结束原 CLI；
+        //   - existing App Server adopt：BotMux 停止自己的 `codex --remote`
+        //     第二客户端，不结束 Codex App 或开发机上的 App Server。
+        // 两种模式都只移除 BotMux 这一侧，不接管来源会话。
         if (!ds) {
           await sessionReply(rootId, t('cmd.no_active_session', undefined, loc));
           break;
         }
-        if (!ds.adoptedFrom) {
+        const existingAppServerAdopt = !!ds.session.existingAppServerEndpoint;
+        if (!isSharedAdoptSession(ds)) {
           await sessionReply(rootId, t('cmd.detach.not_adopted', undefined, loc));
           break;
         }
@@ -1502,7 +1549,7 @@ export async function handleCommand(
           const current = [...activeSessions.values()].find(
             candidate => candidate.session.sessionId === closedSessionId,
           );
-          if (!current || !current.adoptedFrom) return false;
+          if (!current || !isSharedAdoptSession(current)) return false;
           await closeWorkerPoolSession(closedSessionId);
           return true;
         });
@@ -1510,14 +1557,25 @@ export async function handleCommand(
           await sessionReply(rootId, t('cmd.no_active_session', undefined, loc));
           break;
         }
-        await sessionReply(rootId, t('cmd.detach.success', undefined, loc));
-        logger.info(`[${logTag}] Detached (adopt) by ${cmd} command`);
+        await sessionReply(
+          rootId,
+          t(
+            existingAppServerAdopt
+              ? 'cmd.detach.existing_app_server_success'
+              : 'cmd.detach.success',
+            undefined,
+            loc,
+          ),
+        );
+        logger.info(
+          `[${logTag}] Detached ${existingAppServerAdopt ? 'existing App Server' : 'terminal'} adopt by ${cmd} command`,
+        );
         break;
       }
 
       case '/restart': {
         if (ds) {
-          if (ds.adoptedFrom) {
+          if (isSharedAdoptSession(ds)) {
             await sessionReply(rootId, t('card.action.adopt_no_restart', undefined, loc));
             break;
           }
@@ -2813,6 +2871,10 @@ export async function handleCommand(
           await sessionReply(rootId, t('cmd.session.transfer_in_progress', undefined, loc));
           break;
         }
+        if (ds?.session.existingAppServerEndpoint) {
+          await sessionReply(rootId, t('cmd.codex_existing_app_server_adopt.already_attached', undefined, loc));
+          break;
+        }
         if (ds?.adoptedFrom) {
           const adopted = ds.adoptedFrom;
           const cliName = sessionCliDisplayName(ds);
@@ -2822,7 +2884,7 @@ export async function handleCommand(
           break;
         }
         const botCfgForAdopt = ds ? getBot(ds.larkAppId).config : (larkAppId ? getBot(larkAppId).config : undefined);
-        if (botCfgForAdopt?.cliId === 'codex-app') {
+        if (botCfgForAdopt?.cliId === 'codex-app' || botCfgForAdopt?.existingAppServer) {
           if (!ds) {
             await sessionReply(rootId, t('cmd.no_active_session', undefined, loc));
             break;
@@ -3420,7 +3482,7 @@ export async function handleCommand(
         // pendingRepo too, but only after createGroupWithBots has already
         // built a new chat. Failing here keeps relay clean and avoids
         // orphan-chat garbage when the operation can't possibly succeed.
-        if (ds.session.adoptedFrom) {
+        if (isSharedAdoptSession(ds)) {
           await sessionReply(rootId, t('cmd.relay.adopt_not_relayable', undefined, loc));
           break;
         }
@@ -3779,7 +3841,7 @@ export async function handleCommand(
 
         // Front guards (fork needs a clean, real, idle source — same as relay).
         // These MUST run before creating either a topic root or a new group.
-        if (ds.session.adoptedFrom) {
+        if (isSharedAdoptSession(ds)) {
           await sessionReply(rootId, t('cmd.fork.adopt_not_forkable', undefined, loc));
           break;
         }
@@ -4347,6 +4409,8 @@ export async function startCodexAppThreadSession(
   const sessionReply = (rid: string, content: string, msgType?: string) =>
     deps.sessionReply(rid, content, msgType, larkAppId);
   const loc: Locale = localeForBot(ds.larkAppId ?? larkAppId);
+  const botCfg = getBot(ds.larkAppId).config;
+  const existingAppServerEndpoint = botCfg.existingAppServer?.endpoint;
   const title = codexAppThreadTitle(thread);
   if (isSessionTransferring(ds)) {
     await sessionReply(sessionAnchorId(ds), t('cmd.session.transfer_in_progress', undefined, loc));
@@ -4356,11 +4420,10 @@ export async function startCodexAppThreadSession(
   if (await blockRiffTakeover(ds, sessionReply)) return;
   if (await blockTakeoverWhilePendingRepo(ds, sessionReply)) return;
 
-  // A Codex Desktop thread already has one authoritative writer. Prove the
-  // Desktop still owns this exact thread before changing any BotMux state;
-  // spawning another app-server here fails with `active writer` and previously
-  // produced a false green takeover card before that asynchronous failure.
-  await probeCodexDesktopThread(thread.threadId);
+  // The legacy follower path needs an explicit Desktop-owner probe. The
+  // upstream shared-App-Server path validates liveness by starting the official
+  // remote client, so a private-IPC probe would be both redundant and brittle.
+  if (!existingAppServerEndpoint) await probeCodexDesktopThread(thread.threadId);
 
   const targetSessionId = ds.session.sessionId;
   const switched = await withBotTurnMutation(ds.larkAppId, async () => {
@@ -4393,14 +4456,33 @@ export async function startCodexAppThreadSession(
     current.lastScreenStatus = undefined;
     current.session.workingDir = thread.cwd;
     current.session.title = `Codex App: ${title}`;
-    current.session.cliId = 'codex-app';
     current.session.cliSessionId = thread.threadId;
-    current.session.codexAppTransport = 'desktop-ipc';
-    current.session.cliPathOverride = undefined;
-    current.session.wrapperCli = undefined;
-    current.session.model = undefined;
-    current.session.agentFrozen = true;
-    current.spawnModelOverride = undefined;
+    if (existingAppServerEndpoint) {
+      current.session.cliId = 'codex';
+      // Do not reuse a possibly frozen runner/wrapper from the temporary
+      // BotMux shell this topic started with. The next fork freezes the current
+      // `cliId: codex` bot configuration and starts ONLY the official remote
+      // TUI. The endpoint itself is copied onto the session so later edits to
+      // bots.json cannot redirect an already-bound conversation.
+      current.session.existingAppServerEndpoint = existingAppServerEndpoint;
+      delete current.session.cliRuntime;
+      delete current.session.cliPathOverride;
+      delete current.session.wrapperCli;
+      current.session.model = undefined;
+      delete current.session.reasoningEffort;
+      delete current.session.agentFrozen;
+      delete current.session.codexAppTransport;
+      current.spawnModelOverride = undefined;
+    } else {
+      current.session.cliId = 'codex-app';
+      delete current.session.existingAppServerEndpoint;
+      current.session.codexAppTransport = 'desktop-ipc';
+      current.session.cliPathOverride = undefined;
+      current.session.wrapperCli = undefined;
+      current.session.model = undefined;
+      current.spawnModelOverride = undefined;
+      current.session.agentFrozen = true;
+    }
     current.session.adoptedFrom = undefined;
     // 接管已有原生 thread 时，标题所有权属于 Codex App。旧的 BotMux 托管标题
     // 若继续进入 resume init，会反向覆盖用户在 App 中看到的原生标题。
@@ -4408,6 +4490,7 @@ export async function startCodexAppThreadSession(
     current.session.nativeSessionTitleUserDefined = undefined;
     current.session.nativeSessionTitleAwaitingContent = undefined;
     sessionStore.updateSession(current.session);
+    if (existingAppServerEndpoint) forkWorker(current, '', true);
     return { status: 'switched' as const, anchor: sessionAnchorId(current) };
   });
   if (switched.status === 'gone') {
@@ -4421,7 +4504,16 @@ export async function startCodexAppThreadSession(
     );
     return;
   }
-  await sessionReply(switched.anchor, t('cmd.codex_app_adopt.success', { title }, loc));
+  await sessionReply(
+    switched.anchor,
+    t(
+      existingAppServerEndpoint
+        ? 'cmd.codex_existing_app_server_adopt.success'
+        : 'cmd.codex_app_adopt.success',
+      { title },
+      loc,
+    ),
+  );
 }
 
 export async function startAdoptSession(
