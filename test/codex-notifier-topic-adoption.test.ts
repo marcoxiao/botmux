@@ -152,21 +152,6 @@ function route(chatId = 'oc_workbench') {
   });
 }
 
-function pluginAdoptInput() {
-  return {
-    eventId: EVENT.eventId,
-    threadId: EVENT.threadId,
-    nativeTurnId: EVENT.nativeTurnId,
-    cwd: EVENT.cwd,
-    title: EVENT.title,
-    finalPreview: EVENT.finalPreview,
-    status: EVENT.status,
-    completedAt: EVENT.completedAt,
-    cardMessageId: 'om_plugin_root',
-    ownerOpenId: 'ou_owner',
-  } as const;
-}
-
 describe('Codex notifier group topic adoption', () => {
   beforeEach(() => {
     activeSessions.clear();
@@ -253,49 +238,6 @@ describe('Codex notifier group topic adoption', () => {
     )).rejects.toThrow('无法确认完成通知所在会话');
   });
 
-  it('uses the notification card as the topic root for native shared adopt', async () => {
-    const host = createLarkPluginHost('desktop-handoff', 'cli_app', {
-      kind: 'card-action',
-      operatorOpenId: 'ou_owner',
-      cardMessageId: 'om_plugin_root',
-    });
-    const ref = await host.sharedAdopt(pluginAdoptInput());
-
-    expect(mocks.routes).toHaveLength(0);
-    expect(mocks.createSession).toHaveBeenCalledWith(
-      'oc_workbench',
-      'om_plugin_root',
-      'Live task',
-      'group',
-      'thread',
-    );
-    expect(activeSessions.get(sessionKey('om_plugin_root', 'cli_app'))).toMatchObject({
-      worker: expect.any(Object),
-      session: {
-        cliSessionId: THREAD_ID,
-        existingAppServerEndpoint: mocks.existingEndpoint,
-      },
-    });
-    expect(ref).toEqual({
-      sessionId: 'sid-om_plugin_root',
-      threadId: THREAD_ID,
-      chatId: 'oc_workbench',
-      rootMessageId: 'om_plugin_root',
-    });
-  });
-
-  it('does not report native shared adopt success before the official worker is ready', async () => {
-    mocks.adoptionReady = 'delayed';
-    const host = createLarkPluginHost('desktop-handoff', 'cli_app', {
-      kind: 'card-action',
-      operatorOpenId: 'ou_owner',
-      cardMessageId: 'om_plugin_root',
-    });
-
-    await expect(host.sharedAdopt(pluginAdoptInput())).resolves.toMatchObject({ threadId: THREAD_ID });
-    expect(mocks.readyPublished).toBe(true);
-  });
-
   it('refuses plugin shared adopt when no existing App Server is configured', async () => {
     mocks.existingEndpoint = undefined;
     const ctrl = new AbortController();
@@ -314,6 +256,9 @@ describe('Codex notifier group topic adoption', () => {
   it('serializes cards only through the receiving bot transport', async () => {
     const host = createLarkPluginHost('desktop-handoff', 'cli_app', { kind: 'local-event' });
     const card = { schema: '2.0', body: { elements: [] } };
+
+    expect(host).not.toHaveProperty('findSharedAdopt');
+    expect(host).not.toHaveProperty('sharedAdopt');
 
     await expect(host.sendCard({ chatId: 'oc_workbench', card, uuid: 'evt-1' }))
       .resolves.toEqual({ messageId: 'om_sent' });
@@ -341,31 +286,4 @@ describe('Codex notifier group topic adoption', () => {
       .rejects.toThrow('lark_root_message_unavailable');
   });
 
-  it('does not expose shared adopt to a local Hook event', async () => {
-    mocks.existingEndpoint = 'unix:///tmp/codex-app-server.sock';
-    const host = createLarkPluginHost('desktop-handoff', 'cli_app', { kind: 'local-event' });
-
-    await expect(host.sharedAdopt(pluginAdoptInput()))
-      .rejects.toThrow('shared_adopt_requires_card_action');
-    expect(mocks.createSession).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    [
-      'a non-owner card operator',
-      { kind: 'card-action' as const, operatorOpenId: 'ou_other', cardMessageId: 'om_plugin_root' },
-      'shared_adopt_owner_required',
-    ],
-    [
-      'a different card callback',
-      { kind: 'card-action' as const, operatorOpenId: 'ou_owner', cardMessageId: 'om_other' },
-      'shared_adopt_card_mismatch',
-    ],
-  ])('rejects shared adopt from %s', async (_label, dispatchContext, error) => {
-    mocks.existingEndpoint = 'unix:///tmp/codex-app-server.sock';
-    const host = createLarkPluginHost('desktop-handoff', 'cli_app', dispatchContext);
-
-    await expect(host.sharedAdopt(pluginAdoptInput())).rejects.toThrow(error);
-    expect(mocks.createSession).not.toHaveBeenCalled();
-  });
 });

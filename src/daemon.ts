@@ -391,7 +391,6 @@ import { createPluginConfigApi } from './core/plugins/runtime.js';
 import type {
   LarkPluginHost,
   LarkPluginHostDispatchContext,
-  LarkSharedAdoptRef,
 } from './core/plugins/lark-protocol.js';
 import {
   buildCodexNotifierResultCard,
@@ -5381,30 +5380,6 @@ export const __testOnly_waitForNativeSharedAdoptReady = waitForNativeSharedAdopt
 export const __testOnly_adoptCodexNotifierEvent = adoptCodexNotifierEvent;
 export const __testOnly_sharedAdoptCodexAppEvent = adoptCodexNotifierEvent;
 
-function sharedAdoptRefFor(
-  larkAppId: string,
-  threadId: string,
-): LarkSharedAdoptRef | undefined {
-  const endpoint = getBot(larkAppId).config.existingAppServer?.endpoint;
-  if (!endpoint) return undefined;
-  const ds = [...activeSessions.values()].find(candidate =>
-    candidate.larkAppId === larkAppId
-    && candidate.session.status === 'active'
-    && candidate.session.cliSessionId === threadId
-    && candidate.session.existingAppServerEndpoint === endpoint
-    && candidate.worker !== null
-    && !candidate.worker.killed
-    && workerHasInitialized(candidate),
-  );
-  if (!ds) return undefined;
-  return {
-    sessionId: ds.session.sessionId,
-    threadId,
-    chatId: ds.chatId,
-    rootMessageId: sessionAnchorId(ds),
-  };
-}
-
 function createLarkPluginHost(
   pluginId: string,
   larkAppId: string,
@@ -5445,60 +5420,6 @@ function createLarkPluginHost(
     },
     getOwnerOpenId() {
       return getOwnerOpenId(larkAppId) ?? resolvePrimaryOwnerOpenId(larkAppId);
-    },
-    async findSharedAdopt(threadId) {
-      return sharedAdoptRefFor(larkAppId, threadId);
-    },
-    async sharedAdopt(input) {
-      if (dispatchContext.kind !== 'card-action') {
-        throw new Error('shared_adopt_requires_card_action');
-      }
-      const ownerOpenId = getOwnerOpenId(larkAppId) ?? resolvePrimaryOwnerOpenId(larkAppId);
-      if (
-        !ownerOpenId
-        || dispatchContext.operatorOpenId !== ownerOpenId
-        || input.ownerOpenId !== ownerOpenId
-      ) {
-        throw new Error('shared_adopt_owner_required');
-      }
-      if (dispatchContext.cardMessageId !== input.cardMessageId) {
-        throw new Error('shared_adopt_card_mismatch');
-      }
-      if (!isCodexAppThreadId(input.threadId)) throw new Error('invalid_codex_thread_id');
-      if (!input.cardMessageId.trim()) throw new Error('invalid_card_message_id');
-      if (!input.ownerOpenId.trim()) throw new Error('invalid_owner_open_id');
-      const event: CodexTaskCompletedEvent = {
-        schemaVersion: 1,
-        eventId: input.eventId,
-        type: 'task.completed',
-        source: 'codex-desktop',
-        clientSurface: 'codex-app',
-        threadId: input.threadId,
-        nativeTurnId: input.nativeTurnId,
-        status: input.status,
-        cwd: input.cwd,
-        ...(input.title ? { title: input.title } : {}),
-        ...(input.finalPreview ? { finalPreview: input.finalPreview } : {}),
-        completedAt: input.completedAt,
-      };
-      await runWithAbortDeadline(
-        'plugin_native_shared_adopt',
-        CODEX_NOTIFIER_ADOPTION_TIMEOUT_MS,
-        signal => adoptCodexNotifierEvent(
-          larkAppId,
-          event,
-          input.cardMessageId,
-          input.ownerOpenId,
-          signal,
-          Date.now() + CODEX_NOTIFIER_ADOPTION_TIMEOUT_MS,
-          {
-            anchorMessageId: input.cardMessageId,
-          },
-        ),
-      );
-      const ref = sharedAdoptRefFor(larkAppId, input.threadId);
-      if (!ref) throw new Error('native_shared_adopt_not_established');
-      return ref;
     },
     async openCodexApp(threadId) {
       const result = await openCodexAppThread(threadId);

@@ -33,26 +33,6 @@ export interface LarkCardAction {
   open_message_id?: string;
 }
 
-export interface LarkSharedAdoptRef {
-  sessionId: string;
-  threadId: string;
-  chatId: string;
-  rootMessageId: string;
-}
-
-export interface LarkSharedAdoptRequest {
-  eventId: string;
-  threadId: string;
-  nativeTurnId: string;
-  cwd: string;
-  title?: string;
-  finalPreview?: string;
-  status: 'completed' | 'failed' | 'cancelled';
-  completedAt: string;
-  cardMessageId: string;
-  ownerOpenId: string;
-}
-
 export type LarkPluginHostDispatchContext =
   | { kind: 'local-event' }
   | { kind: 'message' }
@@ -77,8 +57,6 @@ export interface LarkPluginHost {
   }): Promise<{ messageId: string }>;
   updateCard(messageId: string, card: Record<string, unknown>): Promise<void>;
   getOwnerOpenId(): string | undefined;
-  findSharedAdopt(threadId: string): Promise<LarkSharedAdoptRef | undefined>;
-  sharedAdopt(input: LarkSharedAdoptRequest): Promise<LarkSharedAdoptRef>;
   openCodexApp(threadId: string): Promise<{ ok: boolean; error?: string }>;
 }
 
