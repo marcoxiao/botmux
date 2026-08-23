@@ -1,303 +1,273 @@
-# Desktop Handoff Plugin Design
+# Desktop Handoff 薄插件设计
 
-**状态：** 已确认
+状态：已修订，待最终确认
 
-**日期：** 2026-08-23
+日期：2026-08-23
+替代：本文件此前由插件直接接管 Desktop IPC 的方案
 
-**取代：** `docs/design/codex-notifier.md` 中的内建 Desktop 接管设计
+## 1. 结论
 
-## 1. 决策
+Desktop 双端协同采用两层结构：
 
-把 Codex/Traex Desktop 与飞书同会话协作实现为独立的 `desktop-handoff` BotMux 插件。BotMux 核心只增加与具体 Agent 无关的飞书插件分发协议和持久路由占用，不再理解 Desktop thread、Codex/Traex IPC、完成 Hook 或接管状态。
+- `botmux-plugin-desktop-handoff` 是独立安装的薄插件，只负责完成通知、CardKit 接管入口、接管目标和事件去重。
+- BotMux 上游原生 Shared Adopt 负责会话连接、消息收发、审批、终端、生命周期和重启恢复。
 
-用户必须在任务通知卡上显式点击“飞书接管”。接管成功后，该飞书话题的后续消息只能进入被绑定的同一个 Desktop thread；Desktop 离线或插件异常时明确失败，不排队、不启动第二个 App Server，也不退回普通 BotMux Session。
+插件不实现第二套 Codex 会话协议，不代理飞书后续消息，也不修改 Worker/Session 的业务分支。
 
-## 2. 背景与根因
-
-BotMux 原生跨端能力适用于 BotMux 自己创建的 App Server/CLI 会话，`/adopt` 适用于可观察和写入的终端复用器会话。已经由 Codex Desktop GUI 打开的 thread 有自己的权威 writer，不能通过启动第二个 App Server 安全接管。
-
-现有实现把 Desktop thread 改写成特殊 BotMux Session，并在 daemon、command handler、message parser、worker、Dashboard 和 Session schema 中增加了 Desktop 专属分支。这使一次飞书回复同时依赖 BotMux Session 生命周期、Worker 恢复、prepared dispatch、飞书话题路由和 Desktop 私有 follower IPC，产生了错误恢复、假在线、错误回退和上游合并冲突。
-
-已经确认的正确输入通道是 Desktop owner/follower IPC。Codex Desktop 使用 `~/.codex/ipc/ipc.sock`；当前 Traex.app 复用相同 Desktop 运行时和协议，使用独立的 `~/.trae/cli/ipc/ipc.sock`。因此二者应共享一个协议客户端，仅由 Provider 提供固定配置。
-
-## 3. 目标与非目标
-
-### 目标
-
-- Codex/Traex Desktop 完成任务后，在指定飞书机器人和话题中发送统一 CardKit 通知。
-- 点击“飞书接管”后持久绑定 `飞书话题 -> Provider + Desktop threadId`。
-- 飞书回复进入同一个 Desktop thread，Desktop 侧结果回到同一个飞书话题。
-- 插件、Desktop 或 BotMux 重启后绑定仍然有效。
-- 离线、忙碌、超时和协议失败均 fail closed，不产生隐式排队或替代会话。
-- 自定义代码集中在独立插件；上游冲突仅限小型、通用的插件协议接线。
-- Codex 和 Traex 共用实现但严格隔离身份、配置、socket 和目标机器人。
-
-### 非目标
-
-- 不通过第二个 App Server 恢复正在 Desktop 中打开的 thread。
-- 不把 Desktop 接管伪装为 BotMux Worker、普通 Session 或 `/adopt` 会话。
-- 不实现离线消息队列、自动切换 Provider、跨机器人猜测 thread 所属关系。
-- 不保证私有 Desktop IPC 在未来版本永久兼容；协议不兼容时明确停用该 Provider。
-- 不保留旧内建实现的运行时兼容分支。
-
-## 4. 方案比较
-
-### A. 插件拥有 Desktop 绑定，核心提供通用分发（采用）
-
-核心只负责安全地把飞书事件交给已声明并占用路由的插件。插件拥有完成事件、CardKit、Desktop IPC、绑定和幂等。这满足最小核心改动和同会话写回。
-
-### B. 特殊 BotMux Session（拒绝）
-
-复用 Session/Worker 的表面成本较低，但会继续混合两个所有权模型，保留当前 prepared dispatch、恢复和错误回退问题。
-
-### C. 独立伴随进程重新连接飞书（拒绝）
-
-可以做到核心零改动，但会重复消费飞书事件、重复管理凭证和进程，并可能与 BotMux 的长连接竞争，运维与一致性更差。
-
-## 5. 总体架构
+上游已经具备官方共享接管路径：
 
 ```text
-Codex / Traex 完成 Hook
-        │
-        ▼
-botmux plugin emit desktop-handoff
-        │  通用鉴权插件事件
-        ▼
-desktop-handoff plugin
-        │
-        ├── CardKit 通知/更新 ─────────────► 飞书话题
-        │                                      │
-        │                         点击“飞书接管”│
-        │                                      ▼
-        │                         通用卡片插件分发
-        │                                      │
-        └──────── Desktop owner 探测 ◄─────────┘
-                       │
-                       ▼
-          核心占用话题路由 + 插件保存 binding
-
-飞书话题回复
-        │
-        ▼
-核心插件路由占用表
-        │
-        ▼
-desktop-handoff.handleMessage
-        │
-        ▼
-Codex 或 Traex Desktop follower IPC
-        │
-        ▼
-同一个 Desktop thread
+codex --remote <existing-app-server-endpoint> resume <thread-id>
 ```
 
-插件不创建 BotMux Session 或 Worker。已接管话题在普通会话查找和创建之前被通用插件路由消费。
+其设计见 [codex-app-shared-adopt.md](../../design/codex-app-shared-adopt.md)。该路径连接同一个 App Server 和同一个 Desktop thread，是本方案唯一的数据面。
 
-## 6. BotMux 通用插件扩展
+## 2. 用户目标
 
-### 6.1 静态贡献
+### 必须满足
 
-插件增加一个飞书贡献入口，静态声明 schema 版本、入口文件和 Action ID。安装和 daemon 启动时校验重复 Action ID；冲突直接失败，不按安装顺序抢占。
+1. Codex App 中发起的任务完成后，飞书“马仔工作台”收到一张 CardKit 通知卡片。
+2. 每个 Desktop thread 对应一个飞书话题，避免所有会话堆在机器人私聊主时间线。
+3. 用户明确点击“飞书接管”后，话题绑定同一个 Desktop thread。
+4. 接管后从飞书发送的消息必须进入原 Desktop thread；Desktop 继续输入时，飞书也能看到后续进度和结果。
+5. 原任务关闭或电脑离线时明确提示，不排队，不静默新建会话。
+6. 保留 BotMux 原生的会话卡片、CardKit、审批、Web Terminal、恢复和关闭能力。
+7. 插件可独立安装、启停和升级；同步 BotMux 上游时不需要反复解决 Worker/Session 冲突。
 
-`desktop-handoff` 声明：
+### 本期不做
 
-- `desktop_handoff.takeover`
-- `desktop_handoff.open_app`
+- 不自动接管所有 Desktop 会话。
+- 不同步接管前的完整历史，只从接管后的实时流开始。
+- 不为失效 Desktop thread 自动创建替代会话。
+- 不保留旧私有 IPC follower 的兼容分支。
+- 不在未验证协议的情况下宣称支持 Traex 同会话接管。
 
-核心不知道这些 Action 的业务语义。
+## 3. 第一性原理
 
-### 6.2 运行时契约
+双端协同只有两个不可混淆的问题：
 
-飞书插件运行时只支持三个入口：
+1. **控制面**：发现任务完成、通知用户、收集显式接管意图。
+2. **数据面**：保证两端读写的是同一个会话对象，并由一个权威生命周期管理器维护。
 
-- `handleMessage(context, api)`：处理核心已路由给该插件的消息。
-- `handleCardAction(context, api)`：处理插件声明的卡片 Action。
-- `handleLocalEvent(event, api)`：处理通过通用本地事件入口投递的 Hook 事件。
+BotMux 上游 Shared Adopt 已经解决数据面。插件再实现 IPC follower、消息路由和恢复状态，会产生两个会话真相源，也是此前“能通知但承接失败、重启后漂移”的根因类别。
 
-核心 Host API 只提供：
+因此本方案只补控制面，不复制数据面。
 
-- 发送、回复、更新 CardKit 消息；
-- 查询当前机器人管理员身份；
-- 占用、查询、释放插件话题路由；
-- 插件私有配置和数据目录；
-- 结构化日志与请求截止时间。
-
-Host API 不暴露 `DaemonSession`、Worker、App Server、Session Store 或 BotMux 内部消息队列。
-
-### 6.3 持久路由占用
-
-核心保存最小记录：
+## 4. 总体架构
 
 ```text
-larkAppId + chatId + scope + anchor -> pluginId + opaqueClaimId
+Codex Desktop Hook
+        │ 完成事件（本机）
+        ▼
+desktop-handoff 插件
+  ├─ 事件去重/最小账本
+  ├─ 创建或更新 CardKit 通知
+  └─ 处理“飞书接管”按钮
+        │ 调用受限 Host API
+        ▼
+BotMux 原生 Shared Adopt
+  ├─ Session / Worker / SessionStore
+  ├─ codex --remote ... resume ...
+  ├─ 飞书消息与审批
+  └─ Semantic Progress / Web Terminal
+        │
+        ▼
+同一个 Codex App Server + 同一个 Desktop thread
 ```
 
-`opaqueClaimId` 由插件提供，核心只做长度和字符校验，不解释其业务含义。插件用它在崩溃恢复时关联自己的事件记录。核心不保存 Provider、threadId、消息正文或 Desktop 信息。消息命中路由后只调用对应插件；插件缺失、加载失败或超时时，核心明确回复“接管插件当前不可用”并停止处理，绝不回退到普通 Session。
+接管成功后，飞书话题到 Session 的映射由 BotMux 原生会话系统持有。插件不再参与普通消息收发。
 
-插件升级或 daemon 重启期间，持久路由仍保持 fail closed。只有插件显式释放路由后，话题才恢复 BotMux 原生处理。
+## 5. 责任边界
 
-### 6.4 本地插件事件
+| 组件 | 负责 | 不负责 |
+|---|---|---|
+| Desktop Handoff 插件 | Hook 事件、去重、通知卡、接管按钮、目标群/话题配置 | Codex 协议、普通消息路由、Worker 恢复 |
+| BotMux Core | 飞书连接、认证、Session、Worker、Shared Adopt、审批、终端、关闭和恢复 | Desktop 完成通知的产品策略 |
+| Semantic Progress 插件 | 接管后任务进度与结果的 CardKit 表达 | Desktop thread 发现与接管 |
+| Codex App Server | thread、turn、item 的顺序和会话真相 | 飞书产品交互 |
 
-`botmux plugin emit <plugin-id>` 从标准输入读取有大小上限的 JSON，经现有本机 daemon 身份与目标 Bot 鉴权后调用 `handleLocalEvent`。核心只校验 envelope、目标插件和目标机器人，不解释事件正文。
+禁区：Desktop Handoff 不得在 `worker.ts`、`worker-pool.ts`、`session-manager.ts` 或 `command-handler.ts` 中添加插件专用条件分支。
 
-Hook 只进行有界采集和本地可靠入队，不直接持有飞书凭证。插件自己的 outbox 负责重试，目标机器人在入队时固定。
+## 6. 最小 Core 扩展
 
-## 7. desktop-handoff 插件
+现有插件框架已支持 Dashboard、Service、CLI、MCP 和 Turn Progress，但缺少本地事件与飞书卡片动作的通用扩展点。只新增一类通用贡献，不新增“Codex 专用插件框架”。
+
+建议约定目录：
 
 ```text
-plugins/desktop-handoff/
-├── lark/                 # 消息、卡片和本地事件入口
-├── providers/
-│   ├── codex.ts          # Codex 固定配置
-│   └── traex.ts          # Traex 固定配置
-├── desktop-ipc.ts        # 共用 owner/follower 协议客户端
-├── binding-store.ts      # 话题到 Desktop thread 的绑定
-├── event-store.ts        # 完成事件和投递收据
-├── outbox.ts             # Hook 可靠投递
-├── cards.ts              # 统一 CardKit 状态卡
-├── hook/                 # Provider Hook 安装与采集
-└── dashboard/            # 插件配置页
+lark/index.js
 ```
 
-### 7.1 Provider 契约
+贡献接口只包含：
 
-Provider 是静态注册项，提供：
+```ts
+interface LarkContribution {
+  actions: string[];
+  handleLocalEvent?(event: PluginLocalEvent, host: LarkPluginHost): Promise<void>;
+  handleCardAction?(action: PluginCardAction, host: LarkPluginHost): Promise<void>;
+}
+```
 
-- `id` 与展示名称；
-- 固定 IPC socket；
-- Hook 根目录；
-- Desktop App 打开方式；
-- 允许的事件来源标识。
+Host API 保持窄边界：
 
-Codex 和 Traex 共用 `desktop-ipc.ts`，不复制帧解析、owner 发现或 follower turn 发送逻辑。事件必须显式携带 Provider，不能根据 threadId、cwd 或当前在线 App 猜测。
+- `sendCard` / `updateCard`：复用 BotMux 当前飞书身份和 CardKit 客户端。
+- `sharedAdopt`：调用上游原生 Shared Adopt 服务。
+- `findSharedAdopt`：只读查询，防止重复通知或重复接管。
+- 可信的 bot、chat、topic、operator 上下文。
 
-### 7.2 接管状态
+Core 必须校验 action ID 唯一性、插件启用状态、事件体大小和调用身份。插件收到的按钮 payload 只含不可猜测的事件 ID，不直接信任客户端传入的 endpoint、thread ID 或命令。
 
-只持久化三种状态：
+本地 Hook 通过一个通用、有限输入的入口投递事件，例如：
 
-- `notified`：有完成事件但话题尚未接管；
-- `adopting`：接管事务执行中；
-- `bound`：路由和插件 binding 均已提交。
+```text
+botmux plugin event desktop-handoff
+```
 
-Desktop 离线不是新的持久状态。`bound` 保留，单次消息投递失败并提示用户打开原任务后重发。
+JSON 从 stdin 读取并限制大小。它只分发给已启用插件，不开放任意模块或命令执行。
 
-### 7.3 接管事务
+不增加以下能力：
 
-1. 校验 Action、事件 ID、卡片消息 ID、操作者和目标机器人。
-2. 从本地账本恢复 Provider 和 threadId，不信任卡片携带的业务字段。
-3. 对固定 Provider socket 执行 owner 探测。
-4. 核心以当前事件 ID 作为 opaque claim ID，原子占用话题路由；此后任何消息都不会落入原生路由。
-5. 插件持久化 binding；失败时释放核心路由。
-6. 更新原 CardKit 为“已接管”。
+- `handleMessage`；普通飞书消息由原生 Session 处理。
+- 插件自己的 route claim 表；接管成功后原生 Session 就是路由真相。
+- 私有 Codex IPC Host API；插件只能请求原生 Shared Adopt。
 
-只有步骤 5 成功后才能展示绿色成功。步骤 4 到 5 的短窗口内若收到消息，插件返回“正在接管”，仍然 fail closed。
+## 7. 独立插件包
 
-重复点击同一事件返回当前成功状态。用另一个有效事件接管同一话题时，先验证新 Desktop owner，再原子替换 binding；验证失败不影响旧绑定。
+插件放在独立仓库，布局与 Semantic Progress 一致：
 
-### 7.4 飞书消息投递
+```text
+/Users/bytedance/AiProjects/botmux-plugin-desktop-handoff/
+├── package.json
+├── lark/index.js
+├── dashboard/index.js
+└── src/
+    ├── event-store.ts
+    ├── cards.ts
+    └── providers/codex.ts
+```
 
-- 使用飞书 `message_id` 作为 Desktop `clientUserMessageId` 和幂等键。
-- 每个话题串行跨越“查 binding、发送 follower turn、写收据”的接纳边界。
-- owner 探测只对明确的 `no-client-found` 做最多三次限界重试，以覆盖 Desktop 的短暂发现窗口。
-- `startTurn` 永不自动重放；连接断开后的结果可能不确定，自动重放会重复执行。
-- Desktop 明确接受后，插件把任务卡更新为“处理中”；失败时更新为统一错误卡。
-- Desktop 离线、thread 未打开、忙碌或协议错误时不排队、不启动 App Server、不创建 BotMux Session。
+通过链接模式开发：
 
-### 7.5 完成事件与 CardKit
+```text
+botmux plugin install ../botmux-plugin-desktop-handoff --link
+```
 
-完成 Hook 以稳定 `event_id` 去重。插件按 Provider、threadId 和未结算飞书消息定位同一任务卡并更新为完成、失败或取消；重复 Hook 只重放幂等更新，不发送第二张卡。
+插件包不复制 BotMux 的 Lark SDK、SessionStore 或 Codex runner。Dashboard 只承载必要配置：启用 Bot、目标工作台群和通知策略。
 
-Desktop 直接发起且尚无飞书话题的任务产生一张新的根卡；同一 thread 后续完成事件回复或更新该话题。接管后的飞书回合始终更新该话题中的任务卡。
+## 8. 关键流程
 
-## 8. 数据与一致性
+### 8.1 完成通知
 
-核心路由占用表和插件 binding store 都采用原子写入、`0700` 目录和 `0600` 文件，并设置明确容量上限。核心记录只负责阻止错误回退；插件记录是 Desktop 路由事实源。
+1. Codex Hook 写入受限本地事件入口。
+2. 插件按 `provider + threadId + completionId` 去重。
+3. 若该 thread 已有活跃 Shared Adopt，避免重复发送“接管”通知；正常进度由 Session/CardKit 展示。
+4. 否则在配置的工作台群中，为该 Desktop thread 创建或更新一个话题根卡片。
+5. 插件账本只保存通知事件、卡片消息和话题定位，不保存会话运行态。
 
-顺序选择“核心先占用、插件后落 binding”：
+### 8.2 显式接管
 
-- 核心占用失败：不改变插件状态；
-- binding 写入失败：释放核心占用；
-- 两步之间崩溃：核心仍 fail closed，插件启动时用 opaque claim ID 查找自己的事件记录，完成 binding；对应事件不存在或已失效时释放孤儿占用；
-- CardKit 更新失败：binding 已成功，不回滚接管；插件通过 outbox 重试界面更新。
+1. 用户点击“飞书接管”。
+2. Core 校验操作者、Bot、插件状态和 action ID。
+3. 插件用事件 ID 从本地账本取回可信的 thread/endpoint 元数据。
+4. 插件调用 `host.sharedAdopt(...)`。
+5. 只有原生 Session 和 remote Worker 已成功建立后，卡片才更新为“已接管”。
+6. 重复点击返回现有接管状态，不创建第二个 Session。
+7. 失败时显示可重试原因；离线不排队，也不创建新会话。
 
-消息收据和事件收据均有上限并按时间淘汰。收据只保存幂等身份和状态，不保存完整消息正文或 Desktop 会话快照。
+### 8.3 接管后双向流转
 
-## 9. 安全边界
+- 飞书话题消息由 BotMux 原生路由进入 Shared Adopt Session。
+- remote Codex client 将消息写入原 Desktop thread。
+- Desktop 产生的新 turn 由同一 remote client 返回 BotMux。
+- BotMux 原生 Worker 和 Semantic Progress 负责 CardKit 更新、审批与最终结果。
+- 用户关闭飞书接管时，只 detach BotMux remote client，不停止源 App Server。
 
-- 只有目标机器人的管理员可以接管或打开 Desktop App。
-- 回调只携带事件 ID；Provider 和 threadId 从本地事件账本恢复。
-- 卡片消息 ID 必须与已送达事件收据一致，拒绝复制或伪造卡片。
-- Provider socket 和 Hook 路径是代码中的固定配置，不能由飞书载荷覆盖。
-- 插件事件入口限制大小、拒绝额外危险字段，并绑定目标 Bot 和插件 ID。
-- 日志不记录凭证、完整用户消息、完整 AI 回复或 Desktop snapshot。
-- 插件异常时已占用路由 fail closed；安全性优先于自动降级可用性。
+## 9. 生命周期与一致性
 
-## 10. 旧实现清理与一次性迁移
+- 会话真相源：BotMux `SessionStore` + Codex App Server。
+- 插件账本：仅用于通知幂等和卡片定位，可重建，不参与 turn 顺序。
+- BotMux daemon 重启：沿用上游 Shared Adopt 恢复逻辑。
+- 插件禁用/卸载：停止新通知和新接管；已经接管的原生 Session 继续安全运行，直至用户关闭。
+- Desktop/App Server 离线：本次飞书消息失败并明确提示，不排队。
+- 源 thread 被删除或不可恢复：不静默 fallback 到新 thread。
 
-实施完成后删除：
+## 10. CardKit 与用户体验
 
-- `src/features/codex-notifier` 内建目录；
-- `daemon.ts` 的 notifier、Desktop 接管和 follower 路由分支；
-- `command-handler.ts` 的 Desktop thread 接管逻辑；
-- `card-handler.ts`、`message-parser.ts` 的 Codex 专属 Action 分支；
-- Session schema 的 `codexAppTransport` 和相关专属字段；
-- Worker、Dashboard 和设置页的 Desktop notifier 特判；
-- 只验证旧内建分支的测试与文档；
-- 当前旧实现上的未提交重试补丁。
+- 未接管：一张完成通知卡，主操作只有“飞书接管”，次操作可“打开 Codex App”。
+- 接管中：按钮禁用，显示连接状态，避免重复触发。
+- 已接管：卡片显示绑定成功；后续交互进入同一话题。
+- 执行中：继续复用 Semantic Progress 的统一 CardKit，不再生成另一套任务卡。
+- 离线/失效：给出直接原因和“重新接管”，不展示内部 endpoint、命令或堆栈。
+- 手机端与桌面端使用同一话题和同一按钮流程，不要求用户记命令。
 
-保留 BotMux 原生 `codex-app`、Traex CLI/App Server、通用 CardKit、通用 TurnProgress 和普通 Session/Worker 能力。
+## 11. Codex 与 Traex
 
-本机切换前执行一次离线迁移：
+P0 只承诺 Codex，因为上游已经提供经过验证的 App Server Shared Adopt。
 
-1. 停止 BotMux，冻结事件写入；
-2. 把仍有效的话题路由和事件收据转换到插件存储；
-3. 把旧 `desktop-ipc` BotMux Session 标记关闭；
-4. 保存只读备份并校验条目数和 threadId；
-5. 安装插件、启动 BotMux 并进行双端验收；
-6. 验收后删除一次性迁移脚本和旧运行状态，不保留兼容读取分支。
+Traex 分两层评估：
 
-迁移不删除 Codex/Traex 原生历史、rollout 或 Desktop thread。
+- 如果其 Hook 稳定，可先复用通知控制面。
+- 只有 Traex 官方提供“连接已有进程并恢复同一会话”的远程客户端协议后，才接入同一 `sharedAdopt` 抽象。
 
-## 11. 测试策略
+不为 Traex 增加私有 IPC fallback，也不启动第二套通用会话框架。若协议不同，单独设计 provider adapter，不能污染 Codex 路径。
 
-### 核心插件契约
+## 12. 安全边界
 
-- 静态 Action 注册、重复 Action 冲突和 schema 校验；
-- 路由占用、释放、重启恢复和容量边界；
-- 已占用路由只进入对应插件；
-- 插件缺失、崩溃或超时时 fail closed；
-- 未占用话题保持 BotMux 原生行为；
-- 本地插件事件的鉴权、大小限制和目标绑定。
+- endpoint 仅接受本机地址，接管后在 Session 中冻结。
+- 不通过飞书卡片透传 endpoint、文件路径或任意 CLI 参数。
+- Hook 入口限制调用用户、payload 大小和 schema。
+- 卡片动作校验操作者权限和目标 Bot。
+- 事件账本使用最小权限，日志脱敏，不记录 Codex 登录凭证。
+- 不读取或复制 macOS 钥匙串凭证。
 
-### 插件单元与集成测试
+## 13. 历史代码清理
 
-- Codex/Traex Provider 固定 socket 与来源隔离；
-- Desktop IPC 分帧、帧上限、owner 发现和 follower turn；
-- `no-client-found` 限界重试，`startTurn` 不重放；
-- 接管鉴权、卡片来源校验和原子状态转换；
-- 飞书 message ID、Hook event ID 和 CardKit 更新幂等；
-- 接管中并发消息不穿透；
-- 同话题替换 binding 成功和验证失败保留旧 binding；
-- 重启恢复、孤儿核心占用恢复和损坏存储 fail closed。
+上线前执行一次性清理，不保留双路径：
 
-### 端到端验收
+1. 保留上游拥有的 `src/features/codex-notifier`，不得整目录删除。
+2. 以 `git diff upstream/master` 为准，只移除 fork 中的私有 Desktop IPC follower、重试和 topic route 扩展。
+3. 删除 `codexAppTransport: 'desktop-ipc'` 等旧类型、配置和条件分支。
+4. 关闭旧 follower Session，删除其 fork 专用状态；不迁移陈旧 binding。
+5. 保留 Codex/Traex 原生历史和用户数据。
+6. 新插件与原生 Shared Adopt 验收通过后，再提交清理，避免半迁移状态。
 
-- Codex：Desktop 完成通知、点击接管、飞书写入原 thread、Desktop 结果回原话题；
-- Traex：执行相同完整链路，并证明只访问 Traex socket；
-- Codex/Traex 即使出现相同 threadId 也不串机器人；
-- Desktop 离线时不排队、不创建 BotMux Session，恢复后用户重发成功；
-- 重复点击、重复飞书事件和重复 Hook 不产生第二个 turn 或第二张卡；
-- BotMux/插件重启后原绑定继续工作；
-- 飞书桌面端和手机端 CardKit 点击、话题回复均可用；
-- BotMux 原生 Codex App、Traex CLI、普通群聊和 `/adopt` 不受影响。
+## 14. 测试与验收
 
-变更前记录全量测试基线。完成时要求新增专项测试全部通过、全量测试没有新增失败，并模拟合并最新上游，确认自定义冲突集中在通用插件扩展点。
+### 插件契约
 
-## 12. 验收标准
+- 未启用插件不会接收本地事件或卡片动作。
+- action ID 冲突在启动时失败。
+- 重复 completion 只产生一张通知卡。
+- 重复点击只得到一个 Shared Adopt Session。
+- 伪造 event ID、跨 Bot 操作和超大 payload 被拒绝。
 
-- 用户能从 Codex 和 Traex 完成卡显式接管。
-- 接管成功后，飞书消息可在 Desktop 原 thread 中看到，Desktop 回复回到同一话题。
-- 任一故障场景都不会创建替代 BotMux 会话或静默排队。
-- BotMux 核心不含 Codex/Traex Desktop 专属 import、字段、Action ID 或路由分支。
-- `desktop-handoff` 可独立安装、升级和卸载；卸载前必须显式释放或迁移其路由占用。
-- 旧内建代码、测试、配置 UI 和永久兼容分支全部清理。
+### 双端主链路
+
+- Desktop 完成 -> 工作台话题收到 CardKit。
+- 点击接管 -> 原生 Shared Adopt 成功，卡片变为已接管。
+- 飞书输入 -> 同一 Desktop thread 收到。
+- Desktop 输入 -> 同一飞书话题显示。
+- 接管前历史不回灌；接管后事件顺序正确。
+- 审批、澄清、停止、Web Terminal 和关闭会话仍可用。
+- 关闭飞书 Session 不终止源 App Server。
+- daemon 重启后能恢复；Desktop 离线时明确失败且不排队。
+
+### 回归与合并
+
+- BotMux 全量构建和相关核心测试通过。
+- Semantic Progress 在接管后继续显示统一 CardKit。
+- 插件禁用后普通 BotMux/Codex/Traex 会话不受影响。
+- 用最新 `upstream/master` 做一次试合并；插件代码无冲突，Core 仅通用 SPI 需要审查。
+
+## 15. 完成定义
+
+满足以下条件才算完成：
+
+1. 同一 Desktop thread 的双向端到端测试通过，而不是只验证通知送达。
+2. 数据面完全走上游 Shared Adopt，没有私有 follower 或 fallback。
+3. Desktop Handoff 能独立安装、启停和卸载。
+4. 接管后的 CardKit、审批和终端走 BotMux 原生链路。
+5. 历史 fork 专用代码和状态完成清理。
+6. 与最新上游试合并无高频核心文件冲突。
+
+该边界是当前最小且完整的方案：只新增 BotMux 缺少的通用插件控制面，复用已经成熟的原生会话数据面。
