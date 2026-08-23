@@ -5388,9 +5388,6 @@ function createLarkPluginHost(
 ): LarkPluginHost {
   return {
     config: createPluginConfigApi(pluginId),
-    async claimExclusiveChat(chatId) {
-      new LarkPluginMessageClaimStore().claimExclusiveChat(pluginId, larkAppId, chatId);
-    },
     async sendCard({ chatId, card, uuid, replyClaim }) {
       const messageId = await sendMessage(
         larkAppId,
@@ -22131,8 +22128,6 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       },
       resolvePluginMessageClaim: (appId, messageIdentity) =>
         new LarkPluginMessageClaimStore().resolve(appId, messageIdentity),
-      hasPluginClaimedChat: (appId, chatId) =>
-        new LarkPluginMessageClaimStore().hasExclusiveChat(appId, chatId),
       handleBotAdded: (chatId, operatorOpenId, appId) => withBotTurnAdmission(
         appId,
         () => handleBotAdded(chatId, operatorOpenId, appId),

@@ -81,7 +81,6 @@ vi.mock('../src/core/plugins/lark-message-claims.js', () => ({
   LarkPluginMessageClaimStore: class {
     claim(input: unknown) { mocks.claim(input); }
     resolve() { return undefined; }
-    hasExclusiveChat() { return false; }
   },
 }));
 

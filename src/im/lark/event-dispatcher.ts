@@ -2289,7 +2289,6 @@ export interface EventHandlers {
     larkAppId: string,
     messageIdentity: string,
   ) => { pluginId: string; rootMessageId: string } | undefined;
-  hasPluginClaimedChat?: (larkAppId: string, chatId: string) => boolean;
   /** 主动开工 — 场景①: fired when this bot is added to a chat
    *  (`im.chat.member.bot.added_v1`). The daemon decides whether to auto-start
    *  based on the bot's `autoStartOnGroupJoin` toggle + allowedUser membership.
@@ -2340,7 +2339,6 @@ export async function dispatchPluginTopicMessage(
     larkAppId: string,
     messageIdentity: string,
   ) => { pluginId: string; rootMessageId: string } | undefined,
-  hasClaimedChat?: (larkAppId: string, chatId: string) => boolean,
 ): Promise<boolean> {
   const threadId = input.message?.thread_id;
   if (typeof threadId !== 'string' || !threadId) return false;
@@ -2350,13 +2348,6 @@ export async function dispatchPluginTopicMessage(
     : threadId;
   if (typeof messageIdentity !== 'string' || !messageIdentity) return false;
   const claim = resolveClaim?.(input.larkAppId, messageIdentity);
-  if (!claim && hasClaimedChat?.(input.larkAppId, input.chatId)) {
-    logger.warn(
-      `[plugin-message] topic identity ${messageIdentity.substring(0, 12)} is not resolved; `
-      + `consuming in claimed chat ${input.chatId.substring(0, 12)} without native fallback`,
-    );
-    return true;
-  }
   const rootMessageId = claim?.rootMessageId ?? messageIdentity;
   if (!input.senderOpenId) return !!claim;
   if (!input.talkAllowed || !handle) return !!claim;
@@ -3688,7 +3679,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         message,
         senderOpenId,
         talkAllowed: isAllowed,
-      }, handlers.handlePluginMessage, handlers.resolvePluginMessageClaim, handlers.hasPluginClaimedChat)) {
+      }, handlers.handlePluginMessage, handlers.resolvePluginMessageClaim)) {
         return;
       }
       let pairedForwardSeed;

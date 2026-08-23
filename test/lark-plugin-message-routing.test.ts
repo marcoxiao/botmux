@@ -81,25 +81,24 @@ describe('Lark plugin topic message routing', () => {
     )).resolves.toBe(true);
   });
 
-  it('fails closed for an unresolved rootless alias inside an exclusive plugin chat', async () => {
+  it('lets an unresolved rootless alias continue to native routing', async () => {
     const handle = vi.fn(async () => false);
 
     await expect(dispatchPluginTopicMessage({
       ...base,
       message: { ...base.message, root_id: '', thread_id: 'omt_unresolved' },
-    }, handle, () => undefined, () => true)).resolves.toBe(true);
-    expect(handle).not.toHaveBeenCalled();
+    }, handle, () => undefined)).resolves.toBe(false);
+    expect(handle).toHaveBeenCalledOnce();
   });
 
-  it('fails closed for an unresolved rooted reply inside an exclusive plugin chat', async () => {
+  it('lets an unresolved rooted reply continue to native routing', async () => {
     const handle = vi.fn(async () => false);
 
     await expect(dispatchPluginTopicMessage(
       base,
       handle,
       () => undefined,
-      () => true,
-    )).resolves.toBe(true);
-    expect(handle).not.toHaveBeenCalled();
+    )).resolves.toBe(false);
+    expect(handle).toHaveBeenCalledOnce();
   });
 });
