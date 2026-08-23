@@ -233,7 +233,7 @@ Expected: FAIL，因为插件实现不存在。
 ```ts
 export default {
   schemaVersion: 1,
-  actions: ['desktop_handoff.takeover', 'desktop_handoff.open_app'],
+  actions: ['desktop-handoff.takeover', 'desktop-handoff.open-app'],
   handleLocalEvent,
   handleCardAction,
 };

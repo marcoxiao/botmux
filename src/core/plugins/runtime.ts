@@ -104,7 +104,7 @@ function setPath(obj: Record<string, unknown>, path: string, value: unknown): vo
   cur[parts[parts.length - 1]] = value;
 }
 
-function createConfigApi(pluginId: string): PluginConfigApi {
+export function createPluginConfigApi(pluginId: string): PluginConfigApi {
   const path = pluginConfigPath(pluginId);
   const write = (value: Record<string, unknown>) => {
     mkdirSync(dirname(path), { recursive: true });
@@ -179,7 +179,7 @@ function baseApi(record: InstalledPluginRecord, runtime: PluginRuntime): Record<
     runtime,
     logger: console,
     resolve: (path: string) => resolvePluginPath(pluginDir, path),
-    config: createConfigApi(record.id),
+    config: createPluginConfigApi(record.id),
     settingsPath: pluginSettingsPath(record.id),
   };
 }

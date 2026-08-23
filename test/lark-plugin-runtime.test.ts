@@ -43,7 +43,7 @@ describe('lark plugin runtime', () => {
     installPlugin('desktop-handoff', `
       module.exports = {
         schemaVersion: 1,
-        actions: ['desktop_handoff.takeover'],
+        actions: ['desktop-handoff.takeover'],
         handleLocalEvent: async () => ({ status: 'accepted' }),
         handleCardAction: async () => ({ toast: { type: 'success', content: 'ok' } }),
       };
@@ -53,7 +53,7 @@ describe('lark plugin runtime', () => {
 
     expect(loaded).toHaveLength(1);
     expect(loaded[0].pluginId).toBe('desktop-handoff');
-    expect(loaded[0].plugin.actions).toEqual(['desktop_handoff.takeover']);
+    expect(loaded[0].plugin.actions).toEqual(['desktop-handoff.takeover']);
   });
 
   it('does not load installed but disabled lark contributions', async () => {
@@ -71,24 +71,12 @@ describe('lark plugin runtime', () => {
   it.each([
     ['bad-schema', `module.exports = { schemaVersion: 2, actions: [], handleLocalEvent: async () => ({}) };`, 'invalid_lark_plugin_schema:bad-schema'],
     ['missing-handlers', `module.exports = { schemaVersion: 1, actions: [] };`, 'invalid_lark_plugin_handlers:missing-handlers'],
-    ['missing-card-handler', `module.exports = { schemaVersion: 1, actions: ['demo.click'], handleLocalEvent: async () => ({}) };`, 'invalid_lark_plugin_card_handler:missing-card-handler'],
+    ['missing-card-handler', `module.exports = { schemaVersion: 1, actions: ['missing-card-handler.click'], handleLocalEvent: async () => ({}) };`, 'invalid_lark_plugin_card_handler:missing-card-handler'],
     ['invalid-action', `module.exports = { schemaVersion: 1, actions: ['bad action'], handleCardAction: async () => ({}) };`, 'invalid_lark_plugin_action:invalid-action:bad action'],
+    ['foreign-action', `module.exports = { schemaVersion: 1, actions: ['other.click'], handleCardAction: async () => ({}) };`, 'invalid_lark_plugin_action_namespace:foreign-action:other.click'],
   ])('fails closed for %s', async (id, source, message) => {
     installPlugin(id, source);
     await expect(loadLarkPlugins([id])).rejects.toThrow(message);
-  });
-
-  it('rejects duplicate action ids across enabled plugins', async () => {
-    const source = `module.exports = {
-      schemaVersion: 1,
-      actions: ['desktop_handoff.takeover'],
-      handleCardAction: async () => ({}),
-    };`;
-    installPlugin('first', source);
-    installPlugin('second', source);
-
-    await expect(loadLarkPlugins(['first', 'second']))
-      .rejects.toThrow('duplicate_lark_plugin_action:desktop_handoff.takeover:first,second');
   });
 
   it('dispatches a local event only to the explicitly addressed loaded plugin', async () => {
@@ -101,7 +89,7 @@ describe('lark plugin runtime', () => {
     `);
     const dispatcher = createLarkPluginDispatcher(
       await loadLarkPlugins(['desktop-handoff']),
-      pluginId => ({ pluginId }),
+      (pluginId, dispatchContext) => ({ pluginId, dispatchContext }),
     );
 
     await expect(dispatcher.dispatchLocalEvent(
@@ -111,7 +99,10 @@ describe('lark plugin runtime', () => {
     )).resolves.toEqual({
       event: { type: 'task.completed' },
       context: { larkAppId: 'cli_bot', managedSession: false },
-      host: { pluginId: 'desktop-handoff' },
+      host: {
+        pluginId: 'desktop-handoff',
+        dispatchContext: { kind: 'local-event' },
+      },
     });
     await expect(dispatcher.dispatchLocalEvent(
       'disabled-plugin',
@@ -124,7 +115,7 @@ describe('lark plugin runtime', () => {
     installPlugin('action-only', `
       module.exports = {
         schemaVersion: 1,
-        actions: ['action_only.click'],
+        actions: ['action-only.click'],
         handleCardAction: async () => ({}),
       };
     `);
@@ -138,5 +129,45 @@ describe('lark plugin runtime', () => {
       {},
       { larkAppId: 'cli_bot', managedSession: false },
     )).rejects.toThrow('lark_plugin_local_event_handler_not_found:action-only');
+  });
+
+  it('dispatches only declared namespaced card actions and preserves handled undefined', async () => {
+    installPlugin('desktop-handoff', `
+      module.exports = {
+        schemaVersion: 1,
+        actions: ['desktop-handoff.takeover'],
+        handleCardAction: async (data, context, host) => {
+          globalThis.__larkActionCall = { data, context, host };
+          return undefined;
+        },
+      };
+    `);
+    const dispatcher = createLarkPluginDispatcher(
+      await loadLarkPlugins(['desktop-handoff']),
+      (pluginId, dispatchContext) => ({ pluginId, dispatchContext }),
+    );
+    const data = { action: { value: { action: 'desktop-handoff.takeover' } } };
+
+    await expect(dispatcher.dispatchCardAction(
+      data,
+      { larkAppId: 'cli_bot' },
+    )).resolves.toEqual({ handled: true, result: undefined });
+    expect((globalThis as any).__larkActionCall).toEqual({
+      data,
+      context: { larkAppId: 'cli_bot' },
+      host: {
+        pluginId: 'desktop-handoff',
+        dispatchContext: {
+          kind: 'card-action',
+          operatorOpenId: undefined,
+          cardMessageId: undefined,
+        },
+      },
+    });
+    await expect(dispatcher.dispatchCardAction(
+      { action: { value: { action: 'unknown.click' } } },
+      { larkAppId: 'cli_bot' },
+    )).resolves.toEqual({ handled: false });
+    delete (globalThis as any).__larkActionCall;
   });
 });

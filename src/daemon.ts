@@ -390,6 +390,12 @@ import type { SavedWorkflowActorContext } from './workflows/v3/library-service.j
 import { resolveEffectivePluginIds } from './core/plugins/effective.js';
 import { createLarkPluginDispatcher, loadLarkPlugins } from './core/plugins/lark-runtime.js';
 import { handlePluginLocalEventIngress } from './core/plugins/local-event-ingress.js';
+import { createPluginConfigApi } from './core/plugins/runtime.js';
+import type {
+  LarkPluginHost,
+  LarkPluginHostDispatchContext,
+  LarkSharedAdoptRef,
+} from './core/plugins/lark-protocol.js';
 import {
   buildCodexNotifierResultCard,
   CODEX_NOTIFIER_PLUGIN_ID,
@@ -402,6 +408,7 @@ import {
   materializeCodexNotifierOutboxEvent,
   openCodexNotifierStoreWithRecovery,
   openCodexAppThread,
+  isCodexAppThreadId,
   parseCodexNotifierEvent,
   parseCodexNotifierPluginEvent,
   parseCodexNotifierOutboxItem,
@@ -5160,6 +5167,10 @@ async function adoptCodexNotifierEvent(
   ownerOpenId: string,
   signal: AbortSignal,
   deadlineAt: number,
+  options: {
+    anchorMessageId?: string;
+    requireExistingAppServer?: boolean;
+  } = {},
 ): Promise<Record<string, unknown>> {
   signal.throwIfAborted();
   const chatId = await getMessageChatId(larkAppId, cardMessageId, {
@@ -5173,6 +5184,10 @@ async function adoptCodexNotifierEvent(
   signal.throwIfAborted();
 
   const botCfg = getBot(larkAppId).config;
+  const existingAppServerEndpoint = botCfg.existingAppServer?.endpoint;
+  if (options.requireExistingAppServer && !existingAppServerEndpoint) {
+    throw new Error('existing_app_server_not_configured');
+  }
   const chatMode = await getChatModeStrict(larkAppId, chatId);
   signal.throwIfAborted();
   if (chatMode === 'unknown') throw new Error('无法确认完成通知所在会话');
@@ -5180,7 +5195,11 @@ async function adoptCodexNotifierEvent(
   let scope: 'thread' | 'chat';
   let anchor: string;
   let chatType: 'group' | 'p2p';
-  if (chatMode === 'p2p') {
+  if (options.anchorMessageId) {
+    scope = 'thread';
+    anchor = options.anchorMessageId;
+    chatType = chatMode === 'p2p' ? 'p2p' : 'group';
+  } else if (chatMode === 'p2p') {
     scope = botCfg.p2pMode === 'thread' ? 'thread' : 'chat';
     anchor = scope === 'chat' ? chatId : cardMessageId;
     chatType = 'p2p';
@@ -5200,15 +5219,17 @@ async function adoptCodexNotifierEvent(
   if (ds && isSessionTransferring(ds)) {
     throw new Error('该会话正在转移，暂时无法接管；请转移完成后在完成通知卡上重试');
   }
-  const probedSessionId = ds?.session.sessionId;
-  await probeCodexDesktopThread(event.threadId);
-  signal.throwIfAborted();
-  if (
-    ds
-    && probedSessionId
-    && notifierAdoptStaleOrTransferring(ds, activeSessions, activeKey, probedSessionId)
-  ) {
-    throw new Error('该会话正在转移或已变更，无法接管；请稍后在完成通知卡上重试');
+  if (!existingAppServerEndpoint) {
+    const probedSessionId = ds?.session.sessionId;
+    await probeCodexDesktopThread(event.threadId);
+    signal.throwIfAborted();
+    if (
+      ds
+      && probedSessionId
+      && notifierAdoptStaleOrTransferring(ds, activeSessions, activeKey, probedSessionId)
+    ) {
+      throw new Error('该会话正在转移或已变更，无法接管；请稍后在完成通知卡上重试');
+    }
   }
 
   if (!ds) {
@@ -5252,10 +5273,13 @@ async function adoptCodexNotifierEvent(
   // below. If the session is closed, swapped, or re-created under this active
   // key while we await, the post-await revalidation must detect the drift.
   const adoptGenSessionId = ds.session.sessionId;
-  if (
-    ds.session.cliSessionId !== event.threadId
-    || ds.session.codexAppTransport !== 'desktop-ipc'
-  ) {
+  const alreadyAttached = existingAppServerEndpoint
+    ? ds.session.cliSessionId === event.threadId
+      && ds.session.existingAppServerEndpoint === existingAppServerEndpoint
+      && ds.worker !== null
+    : ds.session.cliSessionId === event.threadId
+      && ds.session.codexAppTransport === 'desktop-ipc';
+  if (!alreadyAttached) {
     // Do the two throwable, deadline-sensitive steps FIRST, before mutating any
     // session/pending state: the dynamic import and the 2.2s AbortSignal check.
     // If either fails here nothing has been touched, so no rollback is needed
@@ -5317,6 +5341,17 @@ async function adoptCodexNotifierEvent(
         larkAppId,
         anchor,
       );
+      if (existingAppServerEndpoint) {
+        const current = activeSessions.get(activeKey);
+        if (
+          current !== ds
+          || ds.session.cliSessionId !== event.threadId
+          || ds.session.existingAppServerEndpoint !== existingAppServerEndpoint
+          || ds.worker === null
+        ) {
+          throw new Error('native_shared_adopt_not_established');
+        }
+      }
     } catch (err) {
       // 接管失败/超时:pending 已清空且不回滚(见上)。若曾丢弃过缓冲/未送达输入,把「已取消、
       // 请重发」前置到抛给外层的错误里——外层用它渲染失败卡,用户就不会以为原消息还
@@ -5345,6 +5380,141 @@ export const __testOnly_notifierAdoptStaleOrTransferring = notifierAdoptStaleOrT
 export const __testOnly_notifierAdoptWouldDropInput = notifierAdoptWouldDropInput;
 export const __testOnly_clearPendingRepoStateForNotifierAdopt = clearPendingRepoStateForNotifierAdopt;
 export const __testOnly_adoptCodexNotifierEvent = adoptCodexNotifierEvent;
+export const __testOnly_sharedAdoptCodexAppEvent = adoptCodexNotifierEvent;
+
+function sharedAdoptRefFor(
+  larkAppId: string,
+  threadId: string,
+): LarkSharedAdoptRef | undefined {
+  const endpoint = getBot(larkAppId).config.existingAppServer?.endpoint;
+  if (!endpoint) return undefined;
+  const ds = [...activeSessions.values()].find(candidate =>
+    candidate.larkAppId === larkAppId
+    && candidate.session.status === 'active'
+    && candidate.session.cliSessionId === threadId
+    && candidate.session.existingAppServerEndpoint === endpoint
+    && candidate.worker !== null,
+  );
+  if (!ds) return undefined;
+  return {
+    sessionId: ds.session.sessionId,
+    threadId,
+    chatId: ds.chatId,
+    rootMessageId: sessionAnchorId(ds),
+  };
+}
+
+function createLarkPluginHost(
+  pluginId: string,
+  larkAppId: string,
+  dispatchContext: LarkPluginHostDispatchContext,
+): LarkPluginHost {
+  return {
+    config: createPluginConfigApi(pluginId),
+    async sendCard({ chatId, card, uuid }) {
+      const messageId = await sendMessage(
+        larkAppId,
+        chatId,
+        JSON.stringify(card),
+        'interactive',
+        uuid,
+      );
+      return { messageId };
+    },
+    async replyCard({ rootMessageId, card, uuid }) {
+      const messageId = await replyMessage(
+        larkAppId,
+        rootMessageId,
+        JSON.stringify(card),
+        'interactive',
+        true,
+        uuid,
+      );
+      return { messageId };
+    },
+    async updateCard(messageId, card) {
+      await updateMessage(larkAppId, messageId, JSON.stringify(card));
+    },
+    getOwnerOpenId() {
+      return getOwnerOpenId(larkAppId) ?? resolvePrimaryOwnerOpenId(larkAppId);
+    },
+    async findSharedAdopt(threadId) {
+      return sharedAdoptRefFor(larkAppId, threadId);
+    },
+    async sharedAdopt(input) {
+      if (dispatchContext.kind !== 'card-action') {
+        throw new Error('shared_adopt_requires_card_action');
+      }
+      const ownerOpenId = getOwnerOpenId(larkAppId) ?? resolvePrimaryOwnerOpenId(larkAppId);
+      if (
+        !ownerOpenId
+        || dispatchContext.operatorOpenId !== ownerOpenId
+        || input.ownerOpenId !== ownerOpenId
+      ) {
+        throw new Error('shared_adopt_owner_required');
+      }
+      if (dispatchContext.cardMessageId !== input.cardMessageId) {
+        throw new Error('shared_adopt_card_mismatch');
+      }
+      if (!isCodexAppThreadId(input.threadId)) throw new Error('invalid_codex_thread_id');
+      if (!input.cardMessageId.trim()) throw new Error('invalid_card_message_id');
+      if (!input.ownerOpenId.trim()) throw new Error('invalid_owner_open_id');
+      const event: CodexTaskCompletedEvent = {
+        schemaVersion: 1,
+        eventId: input.eventId,
+        type: 'task.completed',
+        source: 'codex-desktop',
+        clientSurface: 'codex-app',
+        threadId: input.threadId,
+        nativeTurnId: input.nativeTurnId,
+        status: input.status,
+        cwd: input.cwd,
+        ...(input.title ? { title: input.title } : {}),
+        ...(input.finalPreview ? { finalPreview: input.finalPreview } : {}),
+        completedAt: input.completedAt,
+      };
+      await runWithAbortDeadline(
+        'plugin_native_shared_adopt',
+        CODEX_NOTIFIER_ADOPTION_TIMEOUT_MS,
+        signal => adoptCodexNotifierEvent(
+          larkAppId,
+          event,
+          input.cardMessageId,
+          input.ownerOpenId,
+          signal,
+          Date.now() + CODEX_NOTIFIER_ADOPTION_TIMEOUT_MS,
+          {
+            anchorMessageId: input.cardMessageId,
+            requireExistingAppServer: true,
+          },
+        ),
+      );
+      const ref = sharedAdoptRefFor(larkAppId, input.threadId);
+      if (!ref) throw new Error('native_shared_adopt_not_established');
+      return ref;
+    },
+    async openCodexApp(threadId) {
+      const result = await openCodexAppThread(threadId);
+      return result.ok ? { ok: true } : { ok: false, error: result.error };
+    },
+  };
+}
+
+async function loadDaemonLarkPluginDispatcher(larkAppId: string) {
+  const enabledPluginIds = resolveEffectivePluginIds(
+    getBot(larkAppId).config,
+    readGlobalConfig(),
+  );
+  return {
+    enabledPluginIds,
+    dispatcher: createLarkPluginDispatcher(
+      await loadLarkPlugins(enabledPluginIds),
+      (pluginId, dispatchContext) => createLarkPluginHost(pluginId, larkAppId, dispatchContext),
+    ),
+  };
+}
+
+export const __testOnly_createLarkPluginHost = createLarkPluginHost;
 
 const handleCodexNotifierCardAction = createCodexNotifierCardActionHandler({
   getExpectedOwnerOpenId: larkAppId =>
@@ -5367,6 +5537,10 @@ const cardDeps: CardHandlerDeps = {
   lastRepoScan,
   vcMeetingCardAction: (data, appId) => handleVcMeetingCardAction(data, appId),
   codexNotifierCardAction: (data, appId) => handleCodexNotifierCardAction(data, appId),
+  pluginCardAction: async (data, appId) => {
+    const { dispatcher } = await loadDaemonLarkPluginDispatcher(appId);
+    return dispatcher.dispatchCardAction(data, { larkAppId: appId });
+  },
   v3GateDeps: {
     driveRun: (runId) => v3GateRunner.driveDetached(runId),
     // 审批权限：复用 canOperate（话题 owner / allowedUsers / oncall）。无 binding（corrupt /
@@ -6382,25 +6556,18 @@ ipcRoute('POST', '/api/plugin-events', async (req, res) => {
     }
     return jsonRes(res, 400, { ok: false, error: 'bad_json' });
   }
-  const enabledPluginIds = resolveEffectivePluginIds(
-    getBot(larkAppId).config,
-    readGlobalConfig(),
-  );
-  let dispatcher;
+  let pluginRuntime;
   try {
-    dispatcher = createLarkPluginDispatcher(
-      await loadLarkPlugins(enabledPluginIds),
-      () => ({}),
-    );
+    pluginRuntime = await loadDaemonLarkPluginDispatcher(larkAppId);
   } catch (error) {
     logger.warn(`[plugins:lark] failed to load contributions: ${error instanceof Error ? error.message : String(error)}`);
     return jsonRes(res, 503, { ok: false, error: 'plugin_runtime_unavailable' });
   }
   const result = await handlePluginLocalEventIngress(raw, {
     larkAppId,
-    enabledPluginIds,
+    enabledPluginIds: pluginRuntime.enabledPluginIds,
     dispatch: (pluginId, event, context) =>
-      dispatcher.dispatchLocalEvent(pluginId, event, context),
+      pluginRuntime.dispatcher.dispatchLocalEvent(pluginId, event, context),
     onError: (pluginId, error) => logger.warn(
       `[plugins:lark] local event failed plugin=${pluginId}: ${error instanceof Error ? error.message : String(error)}`,
     ),
