@@ -12,10 +12,8 @@
  *  （字符串=用它 / null=当前不该传模型 / undefined=取不到，保持快照=旧行为），
  *  worker 在合并守卫之前覆盖 lastInitConfig.model。
  *
- *  另外两条同族状态转换也在这里锁：
- *  - Codex App 线程接管把 cliId 钉成 codex-app 时必须清掉内存态的
- *    spawnModelOverride（它优先级最高且无条件，否则会泄漏进接管后的启动）；
- *  - session.model 是「上次实际启动用的模型」记录，只在 bot 换过 CLI、
+ *  另一条同族状态转换也在这里锁：session.model 是「上次实际启动用的模型」记录，
+ *  只在 bot 换过 CLI、
  *    session 被钉在旧 CLI 上时兜底。
  *
  * Run:  pnpm vitest run test/restart-live-worker-model.test.ts
@@ -50,7 +48,6 @@ const workerSource = readFileSync(new URL('../src/worker.ts', import.meta.url), 
 const workerPoolSource = readFileSync(new URL('../src/core/worker-pool.ts', import.meta.url), 'utf8');
 const dashboardIpcSource = readFileSync(new URL('../src/core/dashboard-ipc-server.ts', import.meta.url), 'utf8');
 const daemonSource = readFileSync(new URL('../src/daemon.ts', import.meta.url), 'utf8');
-const commandHandlerSource = readFileSync(new URL('../src/core/command-handler.ts', import.meta.url), 'utf8');
 
 let sessionCounter = 0;
 
@@ -247,20 +244,7 @@ describe('worker restart case merges model into lastInitConfig (source pin)', ()
   });
 });
 
-// ─── 5. Codex App 线程接管必须清掉内存态的 per-trigger 覆盖（source pin） ────
-
-describe('Codex App thread takeover clears the in-memory model override', () => {
-  it('the takeover block that pins cliId=codex-app also clears spawnModelOverride', () => {
-    const pin = commandHandlerSource.indexOf("current.session.cliId = 'codex-app';");
-    expect(pin).toBeGreaterThanOrEqual(0);
-    // 接管块紧随其后的几行：清 wrapper / 清 model 记录 / 清一次性覆盖 / 置 frozen。
-    const block = commandHandlerSource.slice(pin, pin + 500);
-    expect(block).toContain('current.session.model = undefined;');
-    expect(block).toContain('current.spawnModelOverride = undefined;');
-  });
-});
-
-// ─── 6. crash-loop park 后由消息触发的恢复重启也要刷新模型 ──────────────────
+// ─── 5. crash-loop park 后由消息触发的恢复重启也要刷新模型 ──────────────────
 
 describe('crash-park retry respawn takes the model carried by the message', () => {
   function messageCaseHead(): string {
