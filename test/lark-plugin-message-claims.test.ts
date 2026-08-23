@@ -25,7 +25,17 @@ describe('LarkPluginMessageClaimStore', () => {
     });
     expect(restored.resolve('cli_other', 'om_root')).toBeUndefined();
     expect(restored.resolve('cli_bot', 'om_unknown')).toBeUndefined();
-    expect(restored.hasExclusiveChat('cli_bot', 'oc_workbench')).toBe(true);
+    expect(restored.hasExclusiveChat('cli_bot', 'oc_workbench')).toBe(false);
+    restored.claimExclusiveChat('desktop-handoff', 'cli_bot', 'oc_workbench');
+    expect(new LarkPluginMessageClaimStore(path).hasExclusiveChat('cli_bot', 'oc_workbench')).toBe(true);
     expect(restored.hasExclusiveChat('cli_bot', 'oc_other')).toBe(false);
+  });
+
+  it('does not let two plugins own the same dedicated chat', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'botmux-plugin-claims-')), 'claims.json');
+    const store = new LarkPluginMessageClaimStore(path);
+    store.claimExclusiveChat('desktop-handoff', 'cli_bot', 'oc_workbench');
+    expect(() => store.claimExclusiveChat('other-plugin', 'cli_bot', 'oc_workbench'))
+      .toThrow('lark_plugin_exclusive_chat_already_claimed');
   });
 });

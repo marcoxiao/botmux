@@ -45,6 +45,8 @@ export type LarkPluginHostDispatchContext =
 /** Narrow, stable capability object exposed to a Lark contribution. */
 export interface LarkPluginHost {
   config: PluginConfigApi;
+  /** Reserve a dedicated plugin workbench before its first outbound card. */
+  claimExclusiveChat(chatId: string): Promise<void>;
   sendCard(input: {
     chatId: string;
     card: Record<string, unknown>;

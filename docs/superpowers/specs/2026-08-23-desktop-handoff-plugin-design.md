@@ -76,6 +76,7 @@ BotMux 通用 Lark 插件入口
 
 - 加载已启用插件并提供 CardKit、owner、配置和打开 App 的窄 Host。
 - 对通过原生人类身份、去重和 `thread_id` 话题校验的消息，使用 `root_id ?? thread_id` 给插件一次认领机会，覆盖飞书“话题内发送并同时发送到会话”的 rootless 事件。
+- 插件若使用专用工作台，必须在首个 provider side effect 前显式、持久声明 exclusive chat；不能由任一历史 root claim 隐式推断整个群的归属。
 - 插件可在发送根卡时声明 `replyClaim: 'exclusive'`；Host 必须从飞书解析并 crash-durable 保存 `(pluginId, larkAppId, chatId, root/alias)` 后才返回成功，不保存 Desktop 业务状态。
 - 首个 `{ handled: true }` 终止原生 Session 创建；全部 false 时仅未知根沿原逻辑继续。已声明的根即使插件禁用、重配或缺失也 fail-closed。
 
@@ -116,7 +117,7 @@ interface LarkPluginV1 {
 调用前置条件由 Core 固定：真实人类、真实话题回复、现有消息去重、复用现有文本提取与前导 @ 清理。普通消息仍遵循 talkAllowed；exclusive claim 在授权失败或插件缺失时直接消费，不能回落原生 Session。插件仍校验 owner 和自身根 route。
 
 消息认领 fail-closed：根消息命中插件账本后，即使未接管、非 owner、空文本、IPC 离线或 provider 抛错，也返回 `handled: true`；只有根消息不属于插件才返回 false。
-若飞书给出 rootless `thread_id` 且别名尚未解析，专用工作台已存在 exclusive claim 时 Core 直接消费并告警，宁可拒绝本次输入也不创建错误 Session。
+若飞书给出 rootless `thread_id` 且别名尚未解析，只有插件事先显式声明的专用工作台才由 Core 直接消费并告警；普通群即使曾出现插件卡片也不受影响。
 
 ## 6. 关键流程
 
@@ -124,7 +125,7 @@ interface LarkPluginV1 {
 
 1. Hook 经本机签名入口投递给启用插件。
 2. 插件只接受主任务的 `UserPromptSubmit/Stop`，按 thread/turn 去重。
-3. 首次完成发送根 CardKit；后续完成通过 `reply_in_thread=true` 回复同一根。
+3. 首次完成先持久声明专用工作台，再发送根 CardKit；后续完成通过 `reply_in_thread=true` 回复同一根。
 4. 根卡撤回后清理旧 route，下次完成重建根卡。
 
 ### 显式接管

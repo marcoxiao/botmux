@@ -8,6 +8,7 @@
 
 - [x] 增加规范化 `LarkPluginMessageContext` 与可选 `handleMessage`。
 - [x] 兼容 `root_id + thread_id` 与 rootless `thread_id` 话题事件，复用原生身份、权限和消息去重。
+- [x] 专用工作台由插件在首卡发送前显式持久声明，不从历史根卡隐式推导群归属。
 - [x] 首个 handled 停止原生路由；exclusive root/alias 在插件禁用、重配或缺失时仍持久 fail-closed。
 - [x] 无 Codex IPC、route 或 provider 业务进入 Core。
 

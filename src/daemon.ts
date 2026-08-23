@@ -5388,6 +5388,9 @@ function createLarkPluginHost(
 ): LarkPluginHost {
   return {
     config: createPluginConfigApi(pluginId),
+    async claimExclusiveChat(chatId) {
+      new LarkPluginMessageClaimStore().claimExclusiveChat(pluginId, larkAppId, chatId);
+    },
     async sendCard({ chatId, card, uuid, replyClaim }) {
       const messageId = await sendMessage(
         larkAppId,
