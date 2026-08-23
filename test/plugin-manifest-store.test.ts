@@ -165,6 +165,7 @@ describe('plugin manifest and registry basics', () => {
     mkdirSync(join(root, 'cli'), { recursive: true });
     mkdirSync(join(root, 'service'), { recursive: true });
     mkdirSync(join(root, 'turn-progress'), { recursive: true });
+    mkdirSync(join(root, 'lark'), { recursive: true });
     writeFileSync(join(root, 'skills', 'browser', 'SKILL.md'), '# Browser\n');
     writeFileSync(join(root, 'mcp', 'server.js'), 'process.stdin.resume();\n');
     writeFileSync(join(root, 'mcp', 'index.json'), JSON.stringify({
@@ -179,6 +180,7 @@ describe('plugin manifest and registry basics', () => {
     }));
     writeFileSync(join(root, 'service', 'index.js'), 'export default { pm2: { script: "./service/server.js" } };\n');
     writeFileSync(join(root, 'turn-progress', 'index.js'), 'export default {};\n');
+    writeFileSync(join(root, 'lark', 'index.js'), 'export default {};\n');
 
     expect(scanPluginContributions(root, { schemaVersion: 1, id: 'agent-chrome', service: { mode: 'auto' } })).toEqual({
       skills: [{ name: 'browser', path: 'skills/browser' }],
@@ -191,6 +193,7 @@ describe('plugin manifest and registry basics', () => {
       },
       service: { entry: 'service/index.js', mode: 'auto' },
       turnProgress: { entry: 'turn-progress/index.js' },
+      lark: { entry: 'lark/index.js' },
     });
   });
 
@@ -536,6 +539,7 @@ describe('plugin manifest and registry basics', () => {
     mkdirSync(join(runtime, 'cli'), { recursive: true });
     mkdirSync(join(runtime, 'dashboard'), { recursive: true });
     mkdirSync(join(runtime, 'service'), { recursive: true });
+    mkdirSync(join(runtime, 'lark'), { recursive: true });
     writeFileSync(join(source, 'package.json'), JSON.stringify({
       name: '@botmux/plugin-full-demo',
       version: '0.1.0',
@@ -561,6 +565,7 @@ describe('plugin manifest and registry basics', () => {
     writeFileSync(join(runtime, 'cli', 'index.js'), 'export default { "browser:ping": () => "pong" };\n');
     writeFileSync(join(runtime, 'dashboard', 'index.js'), 'export default function Demo() { return null; }\n');
     writeFileSync(join(runtime, 'service', 'index.js'), 'export default { pm2: { script: "./service/server.js" } };\n');
+    writeFileSync(join(runtime, 'lark', 'index.js'), 'export default { schemaVersion: 1, actions: [], handleLocalEvent: async () => ({}) };\n');
 
     const codexConfigPath = join(home, '.codex', 'config.toml');
     mkdirSync(dirname(codexConfigPath), { recursive: true });
@@ -585,6 +590,7 @@ describe('plugin manifest and registry basics', () => {
     expect(materialized.mcp?.map(server => `${server.cliId}:${server.name}`)).toEqual(['botmux-gateway:full-demo']);
     expect(materialized.cli?.map(command => command.name)).toEqual(['browser:ping']);
     expect(materialized.dashboard).toEqual([{ id: 'full-demo', entry: 'dashboard/index.js' }]);
+    expect(materialized.lark).toEqual([{ name: 'full-demo' }]);
     expect(materialized.service).toEqual([{ name: 'full-demo' }]);
     expect(readSkillRegistry().skills.browser).toBeUndefined();
     const pluginSkills = resolvePluginSkillPackages(['full-demo']);

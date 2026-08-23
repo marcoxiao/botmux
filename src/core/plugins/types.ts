@@ -1,4 +1,4 @@
-export type PluginRuntime = 'cli' | 'service';
+export type PluginRuntime = 'cli' | 'service' | 'lark';
 export type PluginServiceMode = 'manual' | 'auto';
 
 export interface PluginDashboardEntry {
@@ -61,6 +61,8 @@ export interface PluginServiceContribution extends PluginRuntimeEntrypoint {
 
 export interface PluginTurnProgressContribution extends PluginRuntimeEntrypoint {}
 
+export interface PluginLarkContribution extends PluginRuntimeEntrypoint {}
+
 export interface PluginContributions {
   skills?: PluginSkillEntry[];
   dashboard?: PluginDashboardEntry[];
@@ -68,6 +70,7 @@ export interface PluginContributions {
   cli?: PluginCliContribution;
   service?: PluginServiceContribution;
   turnProgress?: PluginTurnProgressContribution;
+  lark?: PluginLarkContribution;
 }
 
 /** Installation-time scan result before MCP details are moved to private
@@ -144,4 +147,5 @@ export interface PluginMaterializedFile {
   cli?: Array<{ name: string }>;
   dashboard?: Array<{ id: string; entry: string }>;
   service?: Array<{ name: string }>;
+  lark?: Array<{ name: string }>;
 }

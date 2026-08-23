@@ -127,7 +127,7 @@ function createConfigApi(pluginId: string): PluginConfigApi {
   };
 }
 
-function orderedPluginRecords(pluginIds?: readonly string[]): InstalledPluginRecord[] {
+export function orderedPluginRecords(pluginIds?: readonly string[]): InstalledPluginRecord[] {
   const registry = readPluginRegistry();
   const selected = pluginIds?.length ? [...pluginIds] : Object.keys(registry.plugins);
   const out: InstalledPluginRecord[] = [];

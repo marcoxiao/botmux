@@ -173,6 +173,11 @@ function scanTurnProgress(runtimeDir: string): ScannedPluginContributions['turnP
   return isFile(join(runtimeDir, entry)) ? { entry } : undefined;
 }
 
+function scanLark(runtimeDir: string): ScannedPluginContributions['lark'] {
+  const entry = 'lark/index.js';
+  return isFile(join(runtimeDir, entry)) ? { entry } : undefined;
+}
+
 export function scanPluginContributions(runtimeDir: string, manifest: BotmuxPluginManifest): ScannedPluginContributions | undefined {
   const skills = scanSkills(runtimeDir, manifest.id);
   const mcp = scanMcp(runtimeDir, manifest.id);
@@ -180,6 +185,7 @@ export function scanPluginContributions(runtimeDir: string, manifest: BotmuxPlug
   const cli = scanCli(runtimeDir);
   const service = scanService(runtimeDir, manifest.service?.mode);
   const turnProgress = scanTurnProgress(runtimeDir);
+  const lark = scanLark(runtimeDir);
   const contributions: ScannedPluginContributions = {
     ...(skills ? { skills } : {}),
     ...(mcp ? { mcp } : {}),
@@ -187,6 +193,7 @@ export function scanPluginContributions(runtimeDir: string, manifest: BotmuxPlug
     ...(cli ? { cli } : {}),
     ...(service ? { service } : {}),
     ...(turnProgress ? { turnProgress } : {}),
+    ...(lark ? { lark } : {}),
   };
   return Object.keys(contributions).length > 0 ? contributions : undefined;
 }

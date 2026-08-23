@@ -70,6 +70,7 @@ export function materializePlugin(pluginId: string): PluginMaterializedFile {
       ? { dashboard: record.contributions.dashboard.map(entry => ({ id: entry.id, entry: entry.entry })) }
       : {}),
     ...(record.contributions?.service ? { service: [{ name: record.id }] } : {}),
+    ...(record.contributions?.lark ? { lark: [{ name: record.id }] } : {}),
   };
   writeMaterialized(materialized);
   return materialized;
