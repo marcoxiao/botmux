@@ -4,7 +4,7 @@
 
 ## 目标与边界
 
-- 普通 Codex App/CLI 通过 `UserPromptSubmit` 与 `Stop` Hook 采集；不触发 Hook、也不落 rollout 的 Codex App Side Chat 通过本机 Desktop IPC 补充采集。两条路径都只为用户发起的回合向所选 Bot 的管理员发送飞书私聊完成卡。
+- 普通 Codex App/CLI 主要通过 `UserPromptSubmit` 与 `Stop` Hook 采集；安装 Hook 前已经打开的长驻 Codex App 会话由本机 rollout 增量监听补齐；不触发 Hook、也不落 rollout 的 Codex App Side Chat 通过 Desktop IPC 补充采集。三条路径共用同一事件、outbox、路由和幂等链路。
 - 卡片展示项目、用户问题、任务状态和最终 AI 回复。识别为 Codex App 且线程 ID 合法时，管理员可通过飞书回调请求运行 BotMux 的 Mac 打开原会话，也可在飞书中接管后继续处理。
 - Side Chat 是 `ephemeral` 临时会话，没有可供 BotMux 恢复的 rollout；其完成卡只同步结果，不展示接管或打开 App 按钮。
 - BotMux 自己管理的 Codex 会话和子 Agent 不重复通知。
@@ -19,6 +19,8 @@ flowchart LR
   C["Codex App/CLI Stop"] --> D["botmux codex-watch-hook"]
   B --> D
   D --> E["来源过滤与锁屏判断"]
+  R["已打开的旧 Codex App 会话"] --> Q["rollout 增量终态监听"]
+  Q --> E
   S["Codex App Side Chat"] --> T["Desktop IPC snapshot / patch"]
   T --> E
   E --> F["<dataDir>/codex-notifier/outbox"]
@@ -37,7 +39,8 @@ flowchart LR
 | --- | --- |
 | `src/features/codex-notifier/hook-installer.ts` | 幂等合并 Codex `UserPromptSubmit` 与 `Stop` Hook，保留其他 Hook 和已信任命令 |
 | `hook-cli.ts`、`confirmed-turn.ts`、`internal-turn.ts` | 持久化精确用户 turn，过滤 Codex 内部后台任务，Stop 完成处理后消费证明 |
-| `codex-context.ts`、`screen-lock.ts` | 识别 App/CLI、从 transcript 回填当前回合、判断通知时机 |
+| `codex-context.ts`、`screen-lock.ts` | 识别 App/CLI、从 transcript 有界回填当前回合、判断通知时机 |
+| `rollout-monitor.ts` | 为安装 Hook 前已打开的普通 Codex App 会话增量识别新终态；首次启动只建基线，不回放历史 |
 | `side-conversation-monitor.ts` | 发现临时 Side Chat，跟踪 Desktop IPC revision，并把完成状态转换为统一事件 |
 | `event.ts`、`types.ts` | 构造稳定事件 ID，执行严格的跨进程事件校验 |
 | `outbox.ts`、`outbox-worker.ts`、`worker-lock.ts` | 原子落盘、跨 Dashboard 独占消费、顺序投递、失败重试和运行状态记录 |
@@ -45,7 +48,7 @@ flowchart LR
 | `event-store.ts`、`card.ts` | daemon 侧事件账本、幂等投递和飞书完成卡 |
 | `src/dashboard/web/settings-page.tsx` | Dashboard 的实验开关、目标 Bot 和通知时机配置 |
 
-Dashboard 进程持有 outbox worker。`worker.lock` 通过 PID 锁保证即使误启动多个 Dashboard，也只有一个进程消费；Side Chat monitor 也只在同一 lease 持有者中运行，避免多个 Dashboard 重复监听和入队。新鲜但尚未写完的锁文件会保留一个初始化宽限期，崩溃遗留锁会在 PID 消失或损坏锁超过宽限期后回收，滚动重启时新进程会持续重试直至接管。不要再为该能力增加独立 PM2 插件服务。
+Dashboard 进程持有 outbox worker。`worker.lock` 通过 PID 锁保证即使误启动多个 Dashboard，也只有一个进程消费；rollout monitor 与 Side Chat monitor 也只在同一 lease 持有者中运行，避免多个 Dashboard 重复监听和入队。新鲜但尚未写完的锁文件会保留一个初始化宽限期，崩溃遗留锁会在 PID 消失或损坏锁超过宽限期后回收，滚动重启时新进程会持续重试直至接管。不要再为该能力增加独立 PM2 插件服务。
 
 ## 机器级配置
 
@@ -84,6 +87,7 @@ Dashboard 进程持有 outbox worker。`worker.lock` 通过 PID 锁保证即使�
 3. Hook 命令名保持 `botmux codex-watch-hook`，这是旧插件迁入 core 的兼容契约。
 4. 关闭功能时不删除 Hook。Hook 会快速返回 `disabled`，不读取回合、不产生新事件；保留 Hook 可以避免反复开关导致重复信任。
 5. 功能关闭时 worker 也暂停投递，已有 outbox 文件保留；再次开启后继续投递。
+6. Codex App 已经打开的会话不会追溯加载后来安装的 Hook；Dashboard 的 rollout monitor 只从开始观察后的新增终态补齐，不回放启用前或停用期间的历史任务。
 
 Dashboard 启动时会对已开启配置再次执行 Hook reconcile。也可以用以下命令诊断：
 
@@ -100,7 +104,7 @@ botmux codex-watch-status
 
 `UserPromptSubmit` 会为精确的 `session_id + turn_id` 写入 `0600` 来源证明；`Stop` 只有命中该证明，或能从 transcript 回填同一 turn 的真实用户问题时才允许通知。完成投递或确定跳过后删除证明，只有入队失败才保留供重试。这样 daemon 重启、历史会话恢复或 Codex Desktop 后台线程结束时，不会仅凭一个新的 `Stop` 误发历史内容，也不会长期积累已结束 turn 的证明。
 
-Hook 最多读取 transcript 首部 256 KiB 和尾部 4 MiB：首部只解析第一条完整 `session_meta` 以识别 Codex App/CLI 以及 internal/subagent 来源，尾部只提取当前 turn 的用户问题和最终回复兜底；不会把完整 transcript 写入 outbox。完成卡中的最终回复最多保留 6500 个字符。
+Hook 先读取 transcript 首部 256 KiB 和尾部 4 MiB：首部只解析第一条完整 `session_meta` 以识别 Codex App/CLI、工作目录以及 internal/subagent 来源，尾部只提取当前 turn 的用户问题和最终回复。若单个长回合把必要记录推出快速尾窗，才把搜索扩大到最多 64 MiB；读取始终有明确上限，也不会把 transcript 写入 outbox。完成卡中的最终回复最多保留 6500 个字符。
 
 以下任务不会通知：
 
@@ -116,6 +120,18 @@ Codex App 会为普通桌面输入附带不透明的 `client_id`，该字段不�
 macOS 锁屏探测读取 IORegistry 的 `CGSSessionScreenIsLocked` / `IOConsoleLocked`。明确解锁时不通知；macOS 探测异常时按锁屏处理，避免静默漏报。非 macOS 的 `locked_only` 返回不支持，不会悄悄退化成 `always`。
 
 事件 ID 只由 `source + threadId + nativeTurnId + status` 计算，不包含完成时间，因此 Hook 重试仍得到同一事件。入队时会把 `targetBotAppId` 固化到 envelope；之后即使 Dashboard 改了目标 Bot，已经排队的事件仍投递到原目标。
+
+### 已打开普通会话补充采集
+
+Codex App 会在 `~/.codex/sessions/YYYY/MM/DD/` 保存 append-only rollout。单例 monitor 每秒扫描最近活跃的有界文件集合，并只解析各文件上次完整换行之后的新记录：
+
+- 首次启动、重新启用或 Dashboard 接管 lease 时只记录现有 EOF，不补发历史；
+- 新文件即使在两个轮询之间快速完成，也会从头读取，但终态时间必须晚于本次观察水位；
+- 只接受来源严格识别为 `Codex Desktop` 的普通 App 会话，CLI、internal/subagent 和缺少用户问题的记录 fail closed；
+- `task_complete` 与 `turn_aborted` 转换为统一完成事件，事件 ID 与 Hook 相同，因此双路径竞态由现有 outbox/daemon 账本幂等消除；
+- 持久入队失败时不越过该终态行，下次轮询从同一位置重试；停用期间完成的任务不会在重新启用时补发。
+
+该监听只为旧会话补 Hook 缺口，不替代 Hook，也不克隆 Desktop 内存态。扫描状态只保存在当前 Dashboard 进程内；服务离线期间不排队，符合本功能的离线边界。
 
 ### Side Chat 补充采集
 
@@ -148,6 +164,7 @@ Side Chat 在持久入队暂时失败时只保留有界的内存重试集合；�
 - 事件入口只接受主机 Host HMAC 鉴权请求，不对外部网络开放匿名投递。请求携带完整 outbox envelope，daemon 还会校验其中固定的 `targetBotAppId` 与自身一致；迁移期旧 `/api/plugin-events` envelope 也执行相同目标绑定，避免端口复用时错投给其他 Bot。
 - 事件 schema 严格拒绝额外字段、危险属性和超过 64 KiB 的 payload；Codex 原生事件还会校验事件 ID 与原生身份一致。
 - App/CLI 来源在 outbox envelope 中单独保存，落盘的 v1 事件本体保持旧 worker 可读；升级窗口中的旧 worker 最多退化为不展示 App 深链，不会把完成通知当作损坏事件隔离。
+- Desktop IPC 单帧上限为 64 MiB：覆盖已观测的大型合法快照，同时拒绝无界分配；普通旧会话补采集不依赖 IPC 快照。
 - Side Chat 标记同样保存在兼容 envelope；daemon 即使收到伪造的旧按钮回调，也会拒绝接管或打开临时线程。
 - Hook 和 outbox 不持有飞书凭证。只有目标 Bot daemon 可以解析管理员身份并发送私聊。
 - “在飞书中继续处理”和“打开 Codex App”回调都只携带 `event_id`。卡片不会携带线程 UUID、`codex://` URL、完整工作目录或终端写令牌。
@@ -176,6 +193,7 @@ pnpm build
 - outbox 原子入队、重复入队、成功删除、失败保留与退避；
 - 飞书消息幂等、仅管理员可接管、伪造卡片消息 ID 被拒绝；
 - Dashboard 的默认关闭、目标必填、平台限制和部分配置更新。
+- 旧 App 会话 rollout 首次基线、长回合有界回填、CLI/internal 过滤、停用不回放和入队失败重试。
 - Side Chat snapshot/patch 状态转换、首次基线、快速完成恢复、危险 patch 路径拒绝和候选目录边界。
 
 手工验收建议：

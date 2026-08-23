@@ -4,9 +4,9 @@ import { createConnection, type Socket } from 'node:net';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import type { CodexAppTurnInput } from '../../types.js';
+import { CODEX_DESKTOP_IPC_MAX_FRAME_BYTES } from './desktop-ipc-protocol.js';
 
 const THREAD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const IPC_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const IPC_VERSION = 1;
 
@@ -235,7 +235,7 @@ class CodexDesktopIpcClient {
         if (this.headerOffset < 4) continue;
         const frameLength = this.header.readUInt32LE(0);
         this.headerOffset = 0;
-        if (frameLength === 0 || frameLength > IPC_MAX_FRAME_BYTES) {
+        if (frameLength === 0 || frameLength > CODEX_DESKTOP_IPC_MAX_FRAME_BYTES) {
           this.failAll(new Error(`Codex App IPC 帧长度无效：${frameLength}`));
           this.close();
           return;

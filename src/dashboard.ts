@@ -262,6 +262,7 @@ import {
   probeCodexNotifierHookHealth,
   readCodexNotifierWorkerState,
   resolveCodexNotifierConfig,
+  runCodexRolloutCompletionMonitor,
   runCodexSideConversationMonitor,
   runCodexNotifierWorkerSupervisor,
   type CodexNotifierHookHealth,
@@ -1905,11 +1906,20 @@ void runCodexNotifierWorkerSupervisor({
   dataDir: config.session.dataDir,
   signal: codexNotifierAbort.signal,
   emit: item => emitCodexNotifierOutboxItem(item, { signal: codexNotifierAbort.signal }),
-  runProducer: signal => runCodexSideConversationMonitor({
-    dataDir: config.session.dataDir,
-    signal,
-    logger,
-  }),
+  runProducer: async signal => {
+    await Promise.all([
+      runCodexSideConversationMonitor({
+        dataDir: config.session.dataDir,
+        signal,
+        logger,
+      }),
+      runCodexRolloutCompletionMonitor({
+        dataDir: config.session.dataDir,
+        signal,
+        logger,
+      }),
+    ]);
+  },
   logger,
   onLeaseUnavailable: path => {
     logger.warn(`[codex-notifier] outbox worker 已由另一 Dashboard 持有，等待接管：${path}`);

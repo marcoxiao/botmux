@@ -12,6 +12,7 @@ import {
   findCodexRolloutBySessionId,
 } from '../../services/codex-transcript.js';
 import { createCodexNotifierCompletionEvent } from './event.js';
+import { CODEX_DESKTOP_IPC_MAX_FRAME_BYTES } from './desktop-ipc-protocol.js';
 import { resolveCodexNotifierConfig, type ResolvedCodexNotifierConfig } from './config.js';
 import { enqueueCodexNotifierEvent } from './outbox.js';
 import {
@@ -25,7 +26,6 @@ import type {
 } from './types.js';
 
 const THREAD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const IPC_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const MAX_TRACKED_STATE_BYTES = 32 * 1024 * 1024;
 const IPC_RETRY_MS = 1_000;
 const SCAN_INTERVAL_MS = 500;
@@ -949,7 +949,7 @@ export class CodexSideConversationMonitor {
 
             const frameLength = header.readUInt32LE(0);
             headerOffset = 0;
-            if (frameLength === 0 || frameLength > IPC_MAX_FRAME_BYTES) {
+            if (frameLength === 0 || frameLength > CODEX_DESKTOP_IPC_MAX_FRAME_BYTES) {
               this.logger.warn(`[codex-notifier] Codex Desktop IPC 帧长度无效: ${frameLength}`);
               finish();
               return;

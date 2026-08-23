@@ -131,6 +131,12 @@ export {
   type CodexSideConversationMonitorOptions,
   type CodexVisualizationThread,
 } from './side-conversation-monitor.js';
+export {
+  CodexRolloutCompletionMonitor,
+  listCodexRolloutFiles,
+  runCodexRolloutCompletionMonitor,
+  type CodexRolloutCompletionMonitorOptions,
+} from './rollout-monitor.js';
 export { emitCodexNotifierOutboxItem } from './emitter.js';
 export type {
   CodexClientSurface,

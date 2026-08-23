@@ -157,6 +157,29 @@ describe('Codex Desktop IPC follower client', () => {
     expect(socket.destroyed).toBe(true);
   });
 
+  it('keeps a valid large Desktop broadcast from breaking a pending follower request', async () => {
+    const socket = readySocket((target, message) => {
+      target.respond({
+        type: 'broadcast',
+        method: 'thread-state-snapshot',
+        params: { filler: 'x'.repeat(17 * 1024 * 1024) },
+      });
+      target.respond({
+        type: 'response',
+        requestId: message.requestId,
+        resultType: 'success',
+        method: message.method,
+        handledByClientId: 'desktop-owner',
+        result: {},
+      });
+    });
+
+    await expect(probeCodexDesktopThread('01a02459-7f00-7022-917a-d7e400dab649', {
+      connect: () => asSocket(socket),
+      timeoutMs: 500,
+    })).resolves.toBe('desktop-owner');
+  });
+
   it('fails closed as offline when no Desktop window owns the thread', async () => {
     const socket = readySocket((target, message) => {
       target.respond({

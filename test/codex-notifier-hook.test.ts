@@ -258,6 +258,48 @@ describe('Codex turn context', () => {
     }
   });
 
+  it('finds the prompt when one long turn exceeds the fast tail window', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-context-long-turn-'));
+    const file = join(dir, 'rollout.jsonl');
+    const threadId = '019f8d92-df7c-7572-83ca-b1e99f20204c';
+    try {
+      writeFileSync(file, [
+        JSON.stringify({
+          type: 'session_meta',
+          payload: {
+            session_id: threadId,
+            id: threadId,
+            cwd: '/workspace/large-turn',
+            source: 'vscode',
+            originator: 'Codex Desktop',
+          },
+        }),
+        JSON.stringify({
+          type: 'event_msg',
+          payload: { type: 'task_started', turn_id: 'turn-1' },
+        }),
+        JSON.stringify({
+          type: 'event_msg',
+          payload: { type: 'user_message', message: '超长回合中的用户问题' },
+        }),
+        JSON.stringify({ type: 'response_item', payload: 'x'.repeat(4 * 1024 * 1024 + 1024) }),
+        JSON.stringify({
+          type: 'event_msg',
+          payload: { type: 'task_complete', turn_id: 'turn-1', last_agent_message: '完成' },
+        }),
+      ].join('\n'));
+
+      expect(readCodexTurnContext(file, 'turn-1', threadId)).toEqual({
+        clientSurface: 'codex-app',
+        cwd: '/workspace/large-turn',
+        prompt: '超长回合中的用户问题',
+        lastAssistantMessage: '完成',
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps a complete task_started record at the exact tail boundary', () => {
     const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-context-boundary-'));
     const file = join(dir, 'rollout.jsonl');

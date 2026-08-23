@@ -822,7 +822,7 @@ describe('Codex Side Chat IPC monitor', () => {
     await connected;
   });
 
-  it('decodes fragmented frames without repeated buffer concatenation and rejects oversized frames', async () => {
+  it('decodes fragmented and valid large frames, then rejects frames above the bounded limit', async () => {
     const fragmentedSocket = new FakeIpcSocket();
     fragmentedSocket.onWrite = message => {
       if (message.method !== 'initialize') return;
@@ -861,6 +861,13 @@ describe('Codex Side Chat IPC monitor', () => {
     ).toBe(true));
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(fragmentedSocket.destroyed).toBe(false);
+    fragmentedSocket.emit('data', encodeFrame({
+      type: 'broadcast',
+      method: 'unrelated-large-snapshot',
+      params: { filler: 'x'.repeat(17 * 1024 * 1024) },
+    }));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(fragmentedSocket.destroyed).toBe(false);
     fragmentedAbort.abort();
     await connected;
 
@@ -869,7 +876,7 @@ describe('Codex Side Chat IPC monitor', () => {
     oversizedSocket.onWrite = message => {
       if (message.method !== 'initialize') return;
       const header = Buffer.alloc(4);
-      header.writeUInt32LE(16 * 1024 * 1024 + 1);
+      header.writeUInt32LE(64 * 1024 * 1024 + 1);
       queueMicrotask(() => oversizedSocket.emit('data', header));
     };
     queueMicrotask(() => oversizedSocket.emit('connect'));

@@ -4,6 +4,7 @@ import { isInternalCodexPrompt, isInternalCodexSessionMeta } from './internal-tu
 
 const MAX_TRANSCRIPT_HEAD_BYTES = 256 * 1024;
 const MAX_TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024;
+const MAX_TRANSCRIPT_SEARCH_BYTES = 64 * 1024 * 1024;
 
 function cleanSingleLine(value: unknown, maxLength: number): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -15,6 +16,7 @@ function cleanSingleLine(value: unknown, maxLength: number): string | undefined 
 
 export interface CodexTurnContext {
   clientSurface?: CodexClientSurface;
+  cwd?: string;
   prompt?: string;
   lastAssistantMessage?: string;
   internal?: boolean;
@@ -23,7 +25,7 @@ export interface CodexTurnContext {
 function detectSessionMeta(
   row: any,
   sessionId: unknown,
-): Pick<CodexTurnContext, 'clientSurface' | 'internal'> {
+): Pick<CodexTurnContext, 'clientSurface' | 'cwd' | 'internal'> {
   if (row?.type !== 'session_meta' || !row.payload || typeof row.payload !== 'object') return {};
   const payload = row.payload as Record<string, unknown>;
   const internal = isInternalCodexSessionMeta(payload);
@@ -42,8 +44,10 @@ function detectSessionMeta(
     : payload.source === 'exec' || payload.source === 'cli'
       ? 'codex-cli'
       : undefined;
+  const cwd = cleanSingleLine(payload.cwd, 4096);
   return {
     ...(clientSurface ? { clientSurface } : {}),
+    ...(cwd ? { cwd } : {}),
     ...(internal ? { internal: true } : {}),
   };
 }
@@ -57,6 +61,7 @@ export function parseCodexTurnContext(
   let inTargetTurn = false;
   let inspectSessionMeta = true;
   let clientSurface: CodexClientSurface | undefined;
+  let cwd: string | undefined;
   let internal = false;
   let prompt: string | undefined;
   let lastAssistantMessage: string | undefined;
@@ -72,6 +77,7 @@ export function parseCodexTurnContext(
     if (inspectSessionMeta) {
       const meta = detectSessionMeta(row, sessionId);
       clientSurface = meta.clientSurface;
+      cwd = meta.cwd;
       internal = meta.internal === true;
       inspectSessionMeta = false;
     }
@@ -100,6 +106,7 @@ export function parseCodexTurnContext(
   }
   return {
     ...(clientSurface ? { clientSurface } : {}),
+    ...(cwd ? { cwd } : {}),
     ...(prompt ? { prompt } : {}),
     ...(lastAssistantMessage ? { lastAssistantMessage } : {}),
     ...(internal ? { internal: true } : {}),
@@ -130,27 +137,43 @@ export function readCodexTurnContext(
       }
     }
 
-    const length = Math.min(stat.size, MAX_TRANSCRIPT_TAIL_BYTES);
-    const start = stat.size - length;
-    let startsAtRecordBoundary = start === 0;
-    if (start > 0) {
-      const previousByte = Buffer.allocUnsafe(1);
-      startsAtRecordBoundary = readSync(fd, previousByte, 0, 1, start - 1) === 1
-        && previousByte[0] === 0x0a;
+    const readTailContext = (maxBytes: number): CodexTurnContext => {
+      const length = Math.min(stat.size, maxBytes);
+      const start = stat.size - length;
+      let startsAtRecordBoundary = start === 0;
+      if (start > 0) {
+        const previousByte = Buffer.allocUnsafe(1);
+        startsAtRecordBoundary = readSync(fd!, previousByte, 0, 1, start - 1) === 1
+          && previousByte[0] === 0x0a;
+      }
+      const buffer = Buffer.allocUnsafe(length);
+      const bytesRead = readSync(fd!, buffer, 0, length, start);
+      let text = buffer.subarray(0, bytesRead).toString('utf8');
+      if (!startsAtRecordBoundary) {
+        const firstNewline = text.indexOf('\n');
+        text = firstNewline >= 0 ? text.slice(firstNewline + 1) : '';
+      }
+      return parseCodexTurnContext(text, turnId, sessionId);
+    };
+
+    let tailContext = readTailContext(MAX_TRANSCRIPT_TAIL_BYTES);
+    if (
+      stat.size > MAX_TRANSCRIPT_TAIL_BYTES
+      && (!tailContext.prompt || !tailContext.lastAssistantMessage)
+    ) {
+      // 长回合可能把 task_started / user_message 推出 4 MiB 快速尾窗；只在缺字段时
+      // 扩大到有界 64 MiB，覆盖实测的大型 Codex App 回合而不无界读取 transcript。
+      tailContext = readTailContext(MAX_TRANSCRIPT_SEARCH_BYTES);
     }
-    const buffer = Buffer.allocUnsafe(length);
-    const bytesRead = readSync(fd, buffer, 0, length, start);
-    let text = buffer.subarray(0, bytesRead).toString('utf8');
-    if (!startsAtRecordBoundary) {
-      const firstNewline = text.indexOf('\n');
-      text = firstNewline >= 0 ? text.slice(firstNewline + 1) : '';
-    }
-    const tailContext = parseCodexTurnContext(text, turnId, sessionId);
     const clientSurface = stat.size > MAX_TRANSCRIPT_TAIL_BYTES
       ? headContext.clientSurface
       : tailContext.clientSurface;
+    const cwd = stat.size > MAX_TRANSCRIPT_TAIL_BYTES
+      ? headContext.cwd
+      : tailContext.cwd;
     return {
       ...(clientSurface ? { clientSurface } : {}),
+      ...(cwd ? { cwd } : {}),
       ...(tailContext.prompt ? { prompt: tailContext.prompt } : {}),
       ...(tailContext.lastAssistantMessage ? { lastAssistantMessage: tailContext.lastAssistantMessage } : {}),
       ...((headContext.internal || tailContext.internal) ? { internal: true } : {}),
