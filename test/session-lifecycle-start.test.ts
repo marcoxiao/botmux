@@ -231,17 +231,6 @@ beforeEach(() => {
   });
 });
 
-it('fail-closes worker spawn for a native Desktop follower session', () => {
-  const ds = makeDs();
-  ds.session.cliId = 'codex-app';
-  ds.session.cliSessionId = '01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35';
-  ds.session.codexAppTransport = 'desktop-ipc';
-
-  expect(() => forkWorker(ds, 'must use Desktop follower IPC', false))
-    .toThrow('Codex Desktop follower session cannot spawn a worker');
-  expect(forkMock).not.toHaveBeenCalled();
-});
-
 describe('ordinary IM worker receipt acknowledgement', () => {
   it('clears the watchdog when the exact live worker generation receives the turn', async () => {
     vi.useFakeTimers();

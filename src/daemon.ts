@@ -192,9 +192,6 @@ import {
   getDaemonBootId,
   getDaemonStreamingCardUsageSnapshot,
   postTurnStartingCard,
-  startDesktopFollowerTurnProgress,
-  deliverDesktopFollowerFinalThroughProgressCard,
-  waitForDesktopFollowerTurnProgress,
   isSessionTransferring,
   snapshotCodexAppFinalSettlements,
   codexAppFinalSettlementCount,
@@ -415,11 +412,6 @@ import {
   startCodexNotifierAdoptionSession,
   type CodexTaskCompletedEvent,
 } from './features/codex-notifier/index.js';
-import {
-  CodexDesktopUnavailableError,
-  probeCodexDesktopThread,
-  sendCodexDesktopThreadTurn,
-} from './features/codex-notifier/desktop-ipc-client.js';
 
 /** This daemon process's bot larkAppId (set in startDaemon).  Used to scope v3
  *  humanGate cold-attach + start to runs this bot owns (codex blocker #1). */
@@ -4923,30 +4915,6 @@ function codexNotifierTopicRouteStore(larkAppId: string): CodexNotifierTopicRout
   return store;
 }
 
-async function tryDeliverCodexNotifierThroughProgressCard(
-  larkAppId: string,
-  event: CodexTaskCompletedEvent,
-  card: string,
-  targetChatId?: string,
-): Promise<string | undefined> {
-  const matchesEvent = (ds: DaemonSession) =>
-    ds.larkAppId === larkAppId
-    && ds.session.status === 'active'
-    && ds.session.codexAppTransport === 'desktop-ipc'
-    && ds.session.cliSessionId === event.threadId
-    && (!targetChatId || ds.chatId === targetChatId);
-  const candidates = [...activeSessions.values()].filter(matchesEvent);
-  // Ultra-fast native turns can complete while CardKit is still attaching.
-  // Wait for that exact in-memory start, then re-evaluate the durable binding.
-  await Promise.all(candidates.map(ds => waitForDesktopFollowerTurnProgress(ds)));
-  const owner = [...activeSessions.values()].filter(ds =>
-    matchesEvent(ds) && ds.session.turnProgressBinding,
-  );
-  if (owner.length !== 1) return undefined;
-  const result = await deliverDesktopFollowerFinalThroughProgressCard(owner[0]!, card);
-  return result.kind === 'delivered' ? result.messageId : undefined;
-}
-
 function codexNotifierDeliveryCoordinator(larkAppId: string): CodexNotifierDeliveryCoordinator {
   const existing = codexNotifierDeliveryCoordinators.get(larkAppId);
   if (existing) return existing;
@@ -4954,8 +4922,6 @@ function codexNotifierDeliveryCoordinator(larkAppId: string): CodexNotifierDeliv
     larkAppId,
     routeStore: codexNotifierTopicRouteStore(larkAppId),
     getOwnerOpenId: () => getOwnerOpenId(larkAppId) ?? resolvePrimaryOwnerOpenId(larkAppId),
-    tryProgressDelivery: (event, card, targetChatId) =>
-      tryDeliverCodexNotifierThroughProgressCard(larkAppId, event, card, targetChatId),
   });
   codexNotifierDeliveryCoordinators.set(larkAppId, coordinator);
   return coordinator;
@@ -5160,6 +5126,55 @@ function clearPendingRepoStateForNotifierAdopt(ds: DaemonSession): void {
   ds.pendingCodexAppFollowUpContexts = undefined;
 }
 
+async function waitForNativeSharedAdoptReady(
+  ds: DaemonSession,
+  activeKey: string,
+  threadId: string,
+  endpoint: string,
+  signal: AbortSignal,
+  deadlineAt: number,
+): Promise<boolean> {
+  const matchesGeneration = () => activeSessions.get(activeKey) === ds
+    && ds.session.status === 'active'
+    && ds.session.cliSessionId === threadId
+    && ds.session.existingAppServerEndpoint === endpoint;
+  if (!matchesGeneration()) return false;
+  if (workerHasInitialized(ds)) return true;
+  const worker = ds.worker;
+  if (!worker || worker.killed) return false;
+  const timeoutMs = Math.max(0, deadlineAt - Date.now());
+  if (timeoutMs === 0) return false;
+
+  return new Promise<boolean>(resolve => {
+    let settled = false;
+    const finish = (ready: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      worker.off('message', onMessage);
+      worker.off('exit', onExit);
+      signal.removeEventListener('abort', onAbort);
+      resolve(ready);
+    };
+    const check = () => {
+      if (signal.aborted || !matchesGeneration() || ds.worker !== worker || worker.killed) {
+        finish(false);
+        return;
+      }
+      if (workerHasInitialized(ds)) finish(true);
+    };
+    const onMessage = () => queueMicrotask(check);
+    const onExit = () => finish(false);
+    const onAbort = () => finish(false);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref?.();
+    worker.on('message', onMessage);
+    worker.once('exit', onExit);
+    signal.addEventListener('abort', onAbort, { once: true });
+    queueMicrotask(check);
+  });
+}
+
 async function adoptCodexNotifierEvent(
   larkAppId: string,
   event: CodexTaskCompletedEvent,
@@ -5169,7 +5184,6 @@ async function adoptCodexNotifierEvent(
   deadlineAt: number,
   options: {
     anchorMessageId?: string;
-    requireExistingAppServer?: boolean;
   } = {},
 ): Promise<Record<string, unknown>> {
   signal.throwIfAborted();
@@ -5185,7 +5199,7 @@ async function adoptCodexNotifierEvent(
 
   const botCfg = getBot(larkAppId).config;
   const existingAppServerEndpoint = botCfg.existingAppServer?.endpoint;
-  if (options.requireExistingAppServer && !existingAppServerEndpoint) {
+  if (!existingAppServerEndpoint) {
     throw new Error('existing_app_server_not_configured');
   }
   const chatMode = await getChatModeStrict(larkAppId, chatId);
@@ -5213,23 +5227,10 @@ async function adoptCodexNotifierEvent(
   const activeKey = sessionKey(anchor, larkAppId);
   let ds = activeSessions.get(activeKey);
 
-  // Prove that Codex Desktop currently owns this exact native thread before
-  // creating or rewriting any BotMux state. A failed/offline takeover must be
-  // a clean retry: no orphan session, no cleared buffered input, no green card.
+  // The official remote client validates the App Server and exact native
+  // thread while starting. A failed/offline takeover must remain a clean retry.
   if (ds && isSessionTransferring(ds)) {
     throw new Error('该会话正在转移，暂时无法接管；请转移完成后在完成通知卡上重试');
-  }
-  if (!existingAppServerEndpoint) {
-    const probedSessionId = ds?.session.sessionId;
-    await probeCodexDesktopThread(event.threadId);
-    signal.throwIfAborted();
-    if (
-      ds
-      && probedSessionId
-      && notifierAdoptStaleOrTransferring(ds, activeSessions, activeKey, probedSessionId)
-    ) {
-      throw new Error('该会话正在转移或已变更，无法接管；请稍后在完成通知卡上重试');
-    }
   }
 
   if (!ds) {
@@ -5243,7 +5244,7 @@ async function adoptCodexNotifierEvent(
     session.lastCallerOpenId = ownerOpenId;
     session.lastMessageAt = new Date(now).toISOString();
     session.workingDir = event.cwd;
-    session.cliId = 'codex-app';
+    session.cliId = 'codex';
     sessionStore.updateSession(session);
     messageQueue.ensureQueue(anchor);
     ds = {
@@ -5273,12 +5274,9 @@ async function adoptCodexNotifierEvent(
   // below. If the session is closed, swapped, or re-created under this active
   // key while we await, the post-await revalidation must detect the drift.
   const adoptGenSessionId = ds.session.sessionId;
-  const alreadyAttached = existingAppServerEndpoint
-    ? ds.session.cliSessionId === event.threadId
-      && ds.session.existingAppServerEndpoint === existingAppServerEndpoint
-      && ds.worker !== null
-    : ds.session.cliSessionId === event.threadId
-      && ds.session.codexAppTransport === 'desktop-ipc';
+  const alreadyAttached = ds.session.cliSessionId === event.threadId
+    && ds.session.existingAppServerEndpoint === existingAppServerEndpoint
+    && ds.worker !== null;
   if (!alreadyAttached) {
     // Do the two throwable, deadline-sensitive steps FIRST, before mutating any
     // session/pending state: the dynamic import and the 2.2s AbortSignal check.
@@ -5341,17 +5339,6 @@ async function adoptCodexNotifierEvent(
         larkAppId,
         anchor,
       );
-      if (existingAppServerEndpoint) {
-        const current = activeSessions.get(activeKey);
-        if (
-          current !== ds
-          || ds.session.cliSessionId !== event.threadId
-          || ds.session.existingAppServerEndpoint !== existingAppServerEndpoint
-          || ds.worker === null
-        ) {
-          throw new Error('native_shared_adopt_not_established');
-        }
-      }
     } catch (err) {
       // 接管失败/超时:pending 已清空且不回滚(见上)。若曾丢弃过缓冲/未送达输入,把「已取消、
       // 请重发」前置到抛给外层的错误里——外层用它渲染失败卡,用户就不会以为原消息还
@@ -5363,6 +5350,17 @@ async function adoptCodexNotifierEvent(
       throw err;
     }
   }
+
+  const ready = await waitForNativeSharedAdoptReady(
+    ds,
+    activeKey,
+    event.threadId,
+    existingAppServerEndpoint,
+    signal,
+    deadlineAt,
+  );
+  signal.throwIfAborted();
+  if (!ready) throw new Error('native_shared_adopt_not_established');
 
   const baseAdoptNotice = chatType === 'p2p' && scope === 'chat'
     ? '现在可以直接在当前私聊继续发送指令，消息会进入同一个 Codex App 任务；请让原任务在 Codex App 中保持打开，离线时会明确提示，不会排队。'
@@ -5379,6 +5377,7 @@ async function adoptCodexNotifierEvent(
 export const __testOnly_notifierAdoptStaleOrTransferring = notifierAdoptStaleOrTransferring;
 export const __testOnly_notifierAdoptWouldDropInput = notifierAdoptWouldDropInput;
 export const __testOnly_clearPendingRepoStateForNotifierAdopt = clearPendingRepoStateForNotifierAdopt;
+export const __testOnly_waitForNativeSharedAdoptReady = waitForNativeSharedAdoptReady;
 export const __testOnly_adoptCodexNotifierEvent = adoptCodexNotifierEvent;
 export const __testOnly_sharedAdoptCodexAppEvent = adoptCodexNotifierEvent;
 
@@ -5393,7 +5392,9 @@ function sharedAdoptRefFor(
     && candidate.session.status === 'active'
     && candidate.session.cliSessionId === threadId
     && candidate.session.existingAppServerEndpoint === endpoint
-    && candidate.worker !== null,
+    && candidate.worker !== null
+    && !candidate.worker.killed
+    && workerHasInitialized(candidate),
   );
   if (!ds) return undefined;
   return {
@@ -5422,15 +5423,22 @@ function createLarkPluginHost(
       return { messageId };
     },
     async replyCard({ rootMessageId, card, uuid }) {
-      const messageId = await replyMessage(
-        larkAppId,
-        rootMessageId,
-        JSON.stringify(card),
-        'interactive',
-        true,
-        uuid,
-      );
-      return { messageId };
+      try {
+        const messageId = await replyMessage(
+          larkAppId,
+          rootMessageId,
+          JSON.stringify(card),
+          'interactive',
+          true,
+          uuid,
+        );
+        return { messageId };
+      } catch (error) {
+        if (error instanceof MessageWithdrawnError) {
+          throw new Error('lark_root_message_unavailable');
+        }
+        throw error;
+      }
     },
     async updateCard(messageId, card) {
       await updateMessage(larkAppId, messageId, JSON.stringify(card));
@@ -5485,7 +5493,6 @@ function createLarkPluginHost(
           Date.now() + CODEX_NOTIFIER_ADOPTION_TIMEOUT_MS,
           {
             anchorMessageId: input.cardMessageId,
-            requireExistingAppServer: true,
           },
         ),
       );
@@ -19500,7 +19507,6 @@ async function handleThreadReplyAdmitted(
   const tryAcquireInitialStartClaim = (): void => {
     if (initialStartClaimToken
       || !ds
-      || ds.session.codexAppTransport === 'desktop-ipc'
       || (ds.worker && !ds.worker.killed)
       || ds.pendingRepo
       || ds.initialStartPending === true) return;
@@ -20132,93 +20138,6 @@ async function handleThreadReplyAdmitted(
 
   // codexAppSteerable was computed ONCE above (R5-B1-1), before every admission /
   // fork branch; reuse that frozen value for the live-worker / worker-null split.
-
-  // A native Codex Desktop task is already owned by the Desktop process. Route
-  // the turn through its follower IPC; never fall through to worker-null refork,
-  // which would launch a competing app-server writer for the same thread.
-  if (ds.session.codexAppTransport === 'desktop-ipc') {
-    const threadId = ds.session.cliSessionId;
-    const turnSender = await getThreadSender();
-    const botCfg = getBot(ds.larkAppId).config;
-    const cliInput = buildFollowUpCliInput(promptContent, ds.session.sessionId, {
-      attachments,
-      mentions: parsed.mentions,
-      isAdoptMode: false,
-      cliId: 'codex-app',
-      cliPathOverride: ds.session.cliPathOverride ?? botCfg.cliPathOverride,
-      sender: turnSender,
-      larkAppId,
-      chatId: ds.session.chatId,
-      whiteboardId: ds.session.whiteboardId,
-      substituteTrigger,
-      codexAppText: parsed.content,
-      codexAppApplicationContext,
-      codexAppMessageContext,
-      sessionBackendType: ds.session.backendType,
-      turnId: parsed.messageId,
-    });
-    const nativeInput = cliInput.codexAppInput ?? { text: parsed.content };
-    if (!threadId) {
-      await sessionReply(
-        anchor,
-        'Codex App 连接信息已失效，本条消息没有排队；请从新的完成通知卡重新连接后再发送。',
-        'text',
-        larkAppId,
-      );
-      markIngressAdmitted(ctx);
-      return;
-    }
-    // Start the plugin-owned progress card in parallel with Desktop delivery:
-    // presentation must never delay the native turn, while the registered
-    // promise lets the completion ingress wait out an ultra-fast `OK` turn
-    // instead of racing into a second legacy completion card.
-    const progressStart = startDesktopFollowerTurnProgress(ds, parsed.messageId);
-    try {
-      await sendCodexDesktopThreadTurn({
-        threadId,
-        turnId: parsed.messageId,
-        input: nativeInput,
-      });
-      // The Desktop owner accepted the turn. Only now acknowledge ingress and
-      // persist retry metadata; a failed follower request must never look queued.
-      markIngressAdmitted(ctx);
-      rememberLastCliInput(ds, promptContent, cliInput);
-      await noteTurnReceived(
-        ds,
-        parsed.messageId,
-        parsed.content,
-        turnSender,
-        parsed.messageId,
-        substituteTrigger ? SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE : undefined,
-      );
-    } catch (error) {
-      const message = error instanceof CodexDesktopUnavailableError
-        ? 'Codex App 当前离线，或原任务未在 App 中保持打开。本条消息没有排队，请打开原任务后重新发送。'
-        : '发送到 Codex App 失败，本条消息没有排队，请稍后重新发送。';
-      let progressDelivered = false;
-      try {
-        if (await progressStart === 'handled') {
-          const result = await deliverDesktopFollowerFinalThroughProgressCard(
-            ds,
-            JSON.stringify(buildCodexNotifierResultCard('Codex App 当前离线', message, 'red')),
-          );
-          progressDelivered = result.kind === 'delivered';
-        }
-      } catch (progressError) {
-        logger.warn(
-          `[${tag(ds)}] Desktop follower failure card failed ${parsed.messageId}: `
-          + `${progressError instanceof Error ? progressError.message : String(progressError)}`,
-        );
-      }
-      if (!progressDelivered) await sessionReply(anchor, message, 'text', larkAppId);
-      markIngressAdmitted(ctx);
-      logger.warn(
-        `[${tag(ds)}] Desktop follower rejected ${parsed.messageId}: `
-        + `${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    return;
-  }
 
   // Send message to worker via IPC
   if (ds.worker && !ds.worker.killed) {

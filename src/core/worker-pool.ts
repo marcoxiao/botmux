@@ -18,7 +18,6 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mayRestoreWriteAdmission } from '../adapters/backend/destroy-result.js';
 import { config } from '../config.js';
 import { readGlobalConfig, isWorkflowFeatureEnabled } from '../global-config.js';
-import { ensureSessionPluginManifest } from './plugins/session-manifest.js';
 import * as sessionStore from '../services/session-store.js';
 import * as asyncTriggerStore from '../services/async-trigger-store.js';
 import {
@@ -816,127 +815,6 @@ function turnProgressDepsFor(
       await addReaction(ds.larkAppId, primaryTurnId, doneReactionEmojiFor(ds));
     },
   };
-}
-
-function desktopFollowerProgressDeps(ds: DaemonSession): TurnProgressControllerDeps {
-  const cb = requireCallbacks();
-  const threadId = ds.session.cliSessionId;
-  return {
-    ...turnProgressDepsFor(
-      ds,
-      (cardRefJson, turnId, uuid) => cb.sessionReply(
-        sessionAnchorId(ds),
-        cardRefJson,
-        'interactive',
-        ds.larkAppId,
-        fallbackTurnId(ds, turnId),
-        { uuid },
-      ),
-    ),
-    isGenerationActive: workerGeneration =>
-      workerGeneration === 0
-      && ds.session.codexAppTransport === 'desktop-ipc'
-      && ds.session.cliSessionId === threadId,
-  };
-}
-
-/**
- * A Desktop-owned Codex task has no BotMux worker to emit progress facts. Once
- * its follower IPC accepts a Feishu turn, synthesize only the semantic
- * `turn_started` boundary so the configured progress plugin owns presentation.
- */
-const desktopFollowerProgressStarts = new WeakMap<DaemonSession, {
-  turnId: string;
-  promise: Promise<'handled' | 'fallback' | 'ignored'>;
-}>();
-
-export function startDesktopFollowerTurnProgress(
-  ds: DaemonSession,
-  turnId: string,
-): Promise<'handled' | 'fallback' | 'ignored'> {
-  if (ds.session.codexAppTransport !== 'desktop-ipc') return Promise.resolve('ignored');
-  try {
-    // Existing Desktop bindings may predate plugin manifests because they have
-    // no BotMux worker generation. Create the same immutable session snapshot
-    // lazily; newly adopted bindings already have it, so this is idempotent.
-    ensureSessionPluginManifest({
-      sessionId: ds.session.sessionId,
-      bot: getBot(ds.larkAppId).config,
-      global: readGlobalConfig(),
-    });
-  } catch (error) {
-    logger.warn(
-      `[${tag(ds)}] Desktop follower plugin snapshot failed: `
-      + `${error instanceof Error ? error.message : String(error)}`,
-    );
-    return Promise.resolve('fallback');
-  }
-  const workerGeneration = 0;
-  const current = desktopFollowerProgressStarts.get(ds);
-  if (current?.turnId === turnId) return current.promise;
-  const promise = handleTurnProgressFact(
-    ds,
-    {
-      type: 'turn_progress',
-      sessionId: ds.session.sessionId,
-      turnId,
-      fact: { schemaVersion: 1, seq: 1, atMs: Date.now(), kind: 'turn_started' },
-    },
-    workerGeneration,
-    turnProgressEligibilityFor(ds, turnId),
-    desktopFollowerProgressDeps(ds),
-  ).catch(error => {
-    logger.warn(
-      `[${tag(ds)}] Desktop follower progress card failed ${turnId}: `
-      + `${error instanceof Error ? error.message : String(error)}`,
-    );
-    return 'fallback' as const;
-  });
-  desktopFollowerProgressStarts.set(ds, { turnId, promise });
-  const clear = () => {
-    if (desktopFollowerProgressStarts.get(ds)?.promise === promise) {
-      desktopFollowerProgressStarts.delete(ds);
-    }
-  };
-  void promise.then(clear, clear);
-  return promise;
-}
-
-export async function waitForDesktopFollowerTurnProgress(ds: DaemonSession): Promise<void> {
-  await desktopFollowerProgressStarts.get(ds)?.promise;
-}
-
-/** Replace the Desktop follower's progress card with its reliable notifier
- * final card. Plugin-off/failure sessions return `not_applicable`/`fallback`
- * so the existing notifier delivery remains the authoritative fallback. */
-export async function deliverDesktopFollowerFinalThroughProgressCard(
-  ds: DaemonSession,
-  cardJson: string,
-) {
-  if (ds.session.codexAppTransport !== 'desktop-ipc') {
-    return { kind: 'not_applicable' as const };
-  }
-  const binding = ds.session.turnProgressBinding;
-  if (!binding) return { kind: 'not_applicable' as const };
-  const turnId = binding.primaryTurnId;
-  const result = await deliverFinalThroughProgressCard(
-    ds,
-    {
-      type: 'final_output',
-      sessionId: ds.session.sessionId,
-      turnId,
-      ...(binding.primaryDispatchAttempt !== undefined
-        ? { dispatchAttempt: binding.primaryDispatchAttempt }
-        : {}),
-      content: '',
-      lastUuid: `desktop:${turnId}`,
-    },
-    cardJson,
-    turnProgressEligibilityFor(ds, turnId, binding.primaryDispatchAttempt),
-    desktopFollowerProgressDeps(ds),
-  );
-  if (result.kind === 'delivered') acknowledgeProgressFinal(ds, turnId);
-  return result;
 }
 
 function silentTurnReactions(ds: DaemonSession): boolean {
@@ -8856,9 +8734,6 @@ export function forkWorker(
   promptInput: string | CliTurnPayload,
   resumeOrTurnId: ForkResumeOrTurnId = false,
 ): boolean {
-  if (ds.session.codexAppTransport === 'desktop-ipc') {
-    throw new Error('Codex Desktop follower session cannot spawn a worker');
-  }
   const gatedPrompt = typeof promptInput === 'string' ? { content: promptInput } : promptInput;
   const remoteRetirementPhase = remoteRetirementAdmissionPhase(ds);
   if (remoteRetirementPhase) {

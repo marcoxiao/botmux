@@ -44,7 +44,6 @@ import { repinSessionWorkingDir } from './session-cwd.js';
 import { validateAdoptTarget, adoptTargetKey, adoptTargetLabel, type AdoptableSession } from './session-discovery.js';
 import { validateZellijAdoptTarget, type ZellijAdoptableSession } from './zellij-adopt-discovery.js';
 import { listCodexAppThreads, type CodexAppThreadSummary } from '../services/codex-app-threads.js';
-import { probeCodexDesktopThread } from '../features/codex-notifier/desktop-ipc-client.js';
 import { generateAuthUrl, getTokenStatus, resolveUserToken, DOC_COMMENT_OAUTH_SCOPES, FEED_GROUP_OAUTH_SCOPES } from '../utils/user-token.js';
 import { DocSubscriptionPermissionError, listDocComments, resolveDocFile, subscribeDocFile, unsubscribeDocFile } from '../im/lark/doc-comment.js';
 import { parseDocWatchCommand } from './doc-watch-command.js';
@@ -4419,11 +4418,13 @@ export async function startCodexAppThreadSession(
 
   if (await blockRiffTakeover(ds, sessionReply)) return;
   if (await blockTakeoverWhilePendingRepo(ds, sessionReply)) return;
-
-  // The legacy follower path needs an explicit Desktop-owner probe. The
-  // upstream shared-App-Server path validates liveness by starting the official
-  // remote client, so a private-IPC probe would be both redundant and brittle.
-  if (!existingAppServerEndpoint) await probeCodexDesktopThread(thread.threadId);
+  if (!existingAppServerEndpoint) {
+    await sessionReply(
+      sessionAnchorId(ds),
+      '当前 Bot 未配置 Codex App Server，无法接管原生 Desktop 会话。',
+    );
+    return;
+  }
 
   const targetSessionId = ds.session.sessionId;
   const switched = await withBotTurnMutation(ds.larkAppId, async () => {
@@ -4435,18 +4436,14 @@ export async function startCodexAppThreadSession(
     if (hasProtectedSessionMutationOwnership(current)) {
       return { status: 'pending' as const, anchor: sessionAnchorId(current) };
     }
-    // Desktop follower sessions never spawn a BotMux worker, so no worker will
-    // create the per-generation plugin snapshot for them. Freeze the current
-    // Bot policy here, before mutating/retiring the existing session, so the
-    // normal turn-progress host can render the same plugin card.
+    // Freeze the current Bot policy before replacing the current generation.
     refreshSessionPluginManifest({
       sessionId: current.session.sessionId,
       bot: getBot(current.larkAppId).config,
       global: readGlobalConfig(),
     });
-    // Retire any ordinary BotMux worker before changing the durable transport.
-    // The native Desktop remains the only Codex writer; this session owns no
-    // replacement worker and all future turns route through follower IPC.
+    // Retire any ordinary BotMux worker before attaching the official remote
+    // Codex client to the already-running App Server.
     killWorker(current);
     current.adoptedFrom = undefined;
     current.workingDir = thread.cwd;
@@ -4457,32 +4454,18 @@ export async function startCodexAppThreadSession(
     current.session.workingDir = thread.cwd;
     current.session.title = `Codex App: ${title}`;
     current.session.cliSessionId = thread.threadId;
-    if (existingAppServerEndpoint) {
-      current.session.cliId = 'codex';
-      // Do not reuse a possibly frozen runner/wrapper from the temporary
-      // BotMux shell this topic started with. The next fork freezes the current
-      // `cliId: codex` bot configuration and starts ONLY the official remote
-      // TUI. The endpoint itself is copied onto the session so later edits to
-      // bots.json cannot redirect an already-bound conversation.
-      current.session.existingAppServerEndpoint = existingAppServerEndpoint;
-      delete current.session.cliRuntime;
-      delete current.session.cliPathOverride;
-      delete current.session.wrapperCli;
-      current.session.model = undefined;
-      delete current.session.reasoningEffort;
-      delete current.session.agentFrozen;
-      delete current.session.codexAppTransport;
-      current.spawnModelOverride = undefined;
-    } else {
-      current.session.cliId = 'codex-app';
-      delete current.session.existingAppServerEndpoint;
-      current.session.codexAppTransport = 'desktop-ipc';
-      current.session.cliPathOverride = undefined;
-      current.session.wrapperCli = undefined;
-      current.session.model = undefined;
-      current.spawnModelOverride = undefined;
-      current.session.agentFrozen = true;
-    }
+    current.session.cliId = 'codex';
+    // Do not reuse a possibly frozen runner/wrapper from the temporary BotMux
+    // shell. The endpoint is frozen on the session so later bot config edits
+    // cannot redirect an already-bound conversation.
+    current.session.existingAppServerEndpoint = existingAppServerEndpoint;
+    delete current.session.cliRuntime;
+    delete current.session.cliPathOverride;
+    delete current.session.wrapperCli;
+    current.session.model = undefined;
+    delete current.session.reasoningEffort;
+    delete current.session.agentFrozen;
+    current.spawnModelOverride = undefined;
     current.session.adoptedFrom = undefined;
     // 接管已有原生 thread 时，标题所有权属于 Codex App。旧的 BotMux 托管标题
     // 若继续进入 resume init，会反向覆盖用户在 App 中看到的原生标题。
@@ -4490,7 +4473,7 @@ export async function startCodexAppThreadSession(
     current.session.nativeSessionTitleUserDefined = undefined;
     current.session.nativeSessionTitleAwaitingContent = undefined;
     sessionStore.updateSession(current.session);
-    if (existingAppServerEndpoint) forkWorker(current, '', true);
+    forkWorker(current, '', true);
     return { status: 'switched' as const, anchor: sessionAnchorId(current) };
   });
   if (switched.status === 'gone') {
@@ -4507,9 +4490,7 @@ export async function startCodexAppThreadSession(
   await sessionReply(
     switched.anchor,
     t(
-      existingAppServerEndpoint
-        ? 'cmd.codex_existing_app_server_adopt.success'
-        : 'cmd.codex_app_adopt.success',
+      'cmd.codex_existing_app_server_adopt.success',
       { title },
       loc,
     ),

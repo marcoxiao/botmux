@@ -64,11 +64,9 @@ const mocks = vi.hoisted(() => {
     forkWorker: vi.fn((ds: any) => {
       ds.worker = { killed: false, send: vi.fn() };
     }),
-    startDesktopFollowerTurnProgress: vi.fn(async () => 'handled' as const),
     scanMultipleProjects: vi.fn(() => [] as any[]),
     getAvailableBots: vi.fn(async () => [] as any[]),
     downloadResources: vi.fn(async () => ({ attachments: [], needLogin: false })),
-    sendCodexDesktopThreadTurn: vi.fn(async () => ({ ownerClientId: 'desktop-owner' })),
   };
 });
 
@@ -115,7 +113,6 @@ vi.mock('../src/core/worker-pool.js', async () => {
   return {
     ...actual,
     forkWorker: mocks.forkWorker,
-    startDesktopFollowerTurnProgress: mocks.startDesktopFollowerTurnProgress,
   };
 });
 
@@ -136,17 +133,6 @@ vi.mock('../src/services/project-scanner.js', async () => {
 vi.mock('../src/im/lark/identity-cache.js', async () => {
   const actual = await vi.importActual<any>('../src/im/lark/identity-cache.js');
   return { ...actual, resolveSender: (...args: any[]) => mocks.resolveSender(...args) };
-});
-
-vi.mock('../src/features/codex-notifier/desktop-ipc-client.js', () => {
-  class CodexDesktopUnavailableError extends Error {
-    readonly code = 'codex_desktop_unavailable';
-  }
-  return {
-    CodexDesktopUnavailableError,
-    probeCodexDesktopThread: vi.fn(async () => 'desktop-owner'),
-    sendCodexDesktopThreadTurn: mocks.sendCodexDesktopThreadTurn,
-  };
 });
 
 import { mkdirSync } from 'node:fs';
@@ -245,8 +231,6 @@ describe('ordinary ingress terminal failure → actionable notice', () => {
     mocks.scanMultipleProjects.mockReturnValue([]);
     mocks.getAvailableBots.mockResolvedValue([]);
     mocks.downloadResources.mockResolvedValue({ attachments: [], needLogin: false });
-    mocks.sendCodexDesktopThreadTurn.mockResolvedValue({ ownerClientId: 'desktop-owner' });
-    mocks.startDesktopFollowerTurnProgress.mockResolvedValue('handled');
     activeSessions.clear();
     const bot = registerBot({
       larkAppId: APP,
@@ -255,63 +239,6 @@ describe('ordinary ingress terminal failure → actionable notice', () => {
       allowedUsers: [OWNER],
     });
     bot.resolvedAllowedUsers = [OWNER];
-  });
-
-  it('routes a Desktop-bound thread through native follower IPC and never forks a second worker', async () => {
-    const anchor = 'om_desktop_thread';
-    const ds = seedThreadSession(anchor, 'Desktop task');
-    ds.session.cliId = 'codex-app';
-    ds.session.cliSessionId = '01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35';
-    ds.session.codexAppTransport = 'desktop-ipc';
-    const bot = registerBot({
-      larkAppId: APP,
-      larkAppSecret: 's',
-      cliId: 'codex-app',
-      codexAppCleanInput: true,
-      allowedUsers: [OWNER],
-    });
-    bot.resolvedAllowedUsers = [OWNER];
-
-    await handleThreadReply(
-      makeEventData('om_desktop_turn', '继续修复这个问题', anchor),
-      makeCtx(anchor, 'om_desktop_turn'),
-    );
-
-    expect(mocks.sendCodexDesktopThreadTurn).toHaveBeenCalledWith({
-      threadId: '01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35',
-      turnId: 'om_desktop_turn',
-      input: expect.objectContaining({ text: '继续修复这个问题' }),
-    });
-    expect(mocks.forkWorker).not.toHaveBeenCalled();
-    expect(mocks.startDesktopFollowerTurnProgress).toHaveBeenCalledWith(ds, 'om_desktop_turn');
-  });
-
-  it('Desktop offline rejects visibly without queueing or spawning a competing worker', async () => {
-    const anchor = 'om_desktop_offline';
-    const ds = seedThreadSession(anchor, 'Desktop task');
-    ds.session.cliId = 'codex-app';
-    ds.session.cliSessionId = '01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35';
-    ds.session.codexAppTransport = 'desktop-ipc';
-    const bot = registerBot({
-      larkAppId: APP,
-      larkAppSecret: 's',
-      cliId: 'codex-app',
-      codexAppCleanInput: true,
-      allowedUsers: [OWNER],
-    });
-    bot.resolvedAllowedUsers = [OWNER];
-    const { CodexDesktopUnavailableError } = await import('../src/features/codex-notifier/desktop-ipc-client.js');
-    mocks.sendCodexDesktopThreadTurn.mockRejectedValueOnce(new CodexDesktopUnavailableError('Codex App 当前离线'));
-
-    await handleThreadReply(
-      makeEventData('om_desktop_offline_turn', '不要排队', anchor),
-      makeCtx(anchor, 'om_desktop_offline_turn'),
-    );
-
-    expect(repliedText()).toContain('当前离线');
-    expect(repliedText()).toContain('没有排队');
-    expect(repliedText()).toContain('保持打开');
-    expect(mocks.forkWorker).not.toHaveBeenCalled();
   });
 
   it('thread reply delivery failure replies with the notice and rethrows the original error', async () => {
