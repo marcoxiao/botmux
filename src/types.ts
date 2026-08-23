@@ -536,9 +536,6 @@ export interface Session {
   whiteboardId?: string;
   /** CLI-native resume id when it differs from botmux's sessionId (for example Codex thread id). */
   cliSessionId?: string;
-  /** Native Codex Desktop owns the thread; BotMux submits turns through the
-   * Desktop follower IPC instead of spawning a competing app-server writer. */
-  codexAppTransport?: 'desktop-ipc';
   /**
    * A validated endpoint for an already-running Codex App Server that this
    * session is allowed to attach to. It is frozen with the session rather than

@@ -13,7 +13,6 @@ import {
 } from '../../services/codex-transcript.js';
 import { createCodexNotifierCompletionEvent } from './event.js';
 import { normalizeCodexUserPrompt } from './codex-context.js';
-import { CODEX_DESKTOP_IPC_MAX_FRAME_BYTES } from './desktop-ipc-protocol.js';
 import { resolveCodexNotifierConfig, type ResolvedCodexNotifierConfig } from './config.js';
 import { enqueueCodexNotifierEvent } from './outbox.js';
 import {
@@ -27,6 +26,8 @@ import type {
 } from './types.js';
 
 const THREAD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Codex Desktop may publish a full large conversation snapshot in one frame. */
+const CODEX_DESKTOP_IPC_MAX_FRAME_BYTES = 64 * 1024 * 1024;
 const MAX_TRACKED_STATE_BYTES = 32 * 1024 * 1024;
 const IPC_RETRY_MS = 1_000;
 const SCAN_INTERVAL_MS = 500;

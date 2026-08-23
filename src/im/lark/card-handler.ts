@@ -144,6 +144,11 @@ export interface CardHandlerDeps {
   vcMeetingCardAction?: (data: CardActionData, larkAppId: string) => Promise<any>;
   /** Codex 完成通知卡动作。事件存储、App 打开和会话接管由 daemon 单点持有。 */
   codexNotifierCardAction?: (data: CardActionData, larkAppId: string) => Promise<any>;
+  /** Namespaced plugin card actions. Unknown actions must remain unconsumed. */
+  pluginCardAction?: (
+    data: CardActionData,
+    larkAppId: string,
+  ) => Promise<{ handled: false } | { handled: true; result: any }>;
   /** 授权成功后重放之前被拦截的消息，让用户无需再 @ 一遍。 */
   replayGrantedMessage?: (data: any, larkAppId: string) => void;
 }
@@ -1372,6 +1377,16 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       return { toast: { type: 'error', content: 'Codex 完成通知处理器未启用' } };
     }
     return deps.codexNotifierCardAction(data, larkAppId);
+  }
+
+  if (
+    typeof value?.action === 'string'
+    && value.action.includes('.')
+    && larkAppId
+    && deps.pluginCardAction
+  ) {
+    const dispatched = await deps.pluginCardAction(data, larkAppId);
+    if (dispatched.handled) return dispatched.result;
   }
 
   if (

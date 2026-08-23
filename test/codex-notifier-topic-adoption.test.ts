@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 
 const mocks = vi.hoisted(() => ({
   chatId: 'oc_workbench',
@@ -7,7 +8,12 @@ const mocks = vi.hoisted(() => ({
   createSession: vi.fn(),
   updateSession: vi.fn(),
   adoptionAnchors: [] as string[],
-  probeCodexDesktopThread: vi.fn(async () => 'codex-desktop-owner'),
+  existingEndpoint: undefined as string | undefined,
+  sendMessage: vi.fn(async () => 'om_sent'),
+  replyMessage: vi.fn(async () => 'om_reply'),
+  updateMessage: vi.fn(async () => undefined),
+  adoptionReady: 'immediate' as 'immediate' | 'delayed',
+  readyPublished: false,
 }));
 
 vi.mock('@larksuiteoapi/node-sdk', () => {
@@ -21,6 +27,9 @@ vi.mock('../src/im/lark/client.js', async () => {
     ...actual,
     getMessageChatId: vi.fn(async () => mocks.chatId),
     getChatModeStrict: vi.fn(async () => mocks.chatMode),
+    sendMessage: mocks.sendMessage,
+    replyMessage: mocks.replyMessage,
+    updateMessage: mocks.updateMessage,
   };
 });
 
@@ -28,12 +37,16 @@ vi.mock('../src/bot-registry.js', async () => {
   const actual = await vi.importActual<any>('../src/bot-registry.js');
   return {
     ...actual,
+    getOwnerOpenId: vi.fn(() => 'ou_owner'),
     getBot: vi.fn(() => ({
       config: {
         larkAppId: 'cli_app',
         cliId: 'codex-app',
         p2pMode: 'thread',
         cliPathOverride: undefined,
+        ...(mocks.existingEndpoint
+          ? { existingAppServer: { endpoint: mocks.existingEndpoint } }
+          : {}),
       },
       botName: 'TestBot',
       botOpenId: 'ou_bot',
@@ -60,12 +73,6 @@ vi.mock('../src/services/session-store.js', async () => {
     closeSession: vi.fn(),
   };
 });
-
-vi.mock('../src/features/codex-notifier/desktop-ipc-client.js', () => ({
-  probeCodexDesktopThread: mocks.probeCodexDesktopThread,
-  sendCodexDesktopThreadTurn: vi.fn(),
-  CodexDesktopUnavailableError: class CodexDesktopUnavailableError extends Error {},
-}));
 
 vi.mock('../src/features/codex-notifier/index.js', async () => {
   const actual = await vi.importActual<any>('../src/features/codex-notifier/index.js');
@@ -95,13 +102,27 @@ vi.mock('../src/features/codex-notifier/index.js', async () => {
     ) => {
       mocks.adoptionAnchors.push(anchor);
       ds.session.cliSessionId = target.threadId;
-      ds.session.codexAppTransport = 'desktop-ipc';
+      ds.session.cliId = 'codex';
+      ds.session.existingAppServerEndpoint = mocks.existingEndpoint;
+      const worker = Object.assign(new EventEmitter(), { send: vi.fn(), killed: false });
+      ds.worker = worker;
+      ds.workerReady = mocks.adoptionReady === 'immediate';
+      mocks.readyPublished = ds.workerReady;
+      if (mocks.adoptionReady === 'delayed') {
+        setTimeout(() => {
+          ds.workerReady = true;
+          mocks.readyPublished = true;
+          worker.emit('message', { type: 'ready' });
+        }, 20);
+      }
     }),
   };
 });
 
 import {
   __testOnly_adoptCodexNotifierEvent as adoptEvent,
+  __testOnly_sharedAdoptCodexAppEvent as sharedAdoptEvent,
+  __testOnly_createLarkPluginHost as createLarkPluginHost,
   __testOnly_activeSessions as activeSessions,
 } from '../src/daemon.js';
 import { sessionKey } from '../src/core/types.js';
@@ -131,6 +152,21 @@ function route(chatId = 'oc_workbench') {
   });
 }
 
+function pluginAdoptInput() {
+  return {
+    eventId: EVENT.eventId,
+    threadId: EVENT.threadId,
+    nativeTurnId: EVENT.nativeTurnId,
+    cwd: EVENT.cwd,
+    title: EVENT.title,
+    finalPreview: EVENT.finalPreview,
+    status: EVENT.status,
+    completedAt: EVENT.completedAt,
+    cardMessageId: 'om_plugin_root',
+    ownerOpenId: 'ou_owner',
+  } as const;
+}
+
 describe('Codex notifier group topic adoption', () => {
   beforeEach(() => {
     activeSessions.clear();
@@ -138,7 +174,12 @@ describe('Codex notifier group topic adoption', () => {
     mocks.createSession.mockClear();
     mocks.updateSession.mockClear();
     mocks.adoptionAnchors.length = 0;
-    mocks.probeCodexDesktopThread.mockClear();
+    mocks.existingEndpoint = 'unix:///tmp/codex-app-server.sock';
+    mocks.sendMessage.mockClear();
+    mocks.replyMessage.mockClear();
+    mocks.updateMessage.mockClear();
+    mocks.adoptionReady = 'immediate';
+    mocks.readyPublished = false;
     mocks.chatId = 'oc_workbench';
     mocks.chatMode = 'topic';
   });
@@ -210,6 +251,121 @@ describe('Codex notifier group topic adoption', () => {
       ctrl.signal,
       Date.now() + 2200,
     )).rejects.toThrow('无法确认完成通知所在会话');
-    expect(mocks.probeCodexDesktopThread).not.toHaveBeenCalled();
+  });
+
+  it('uses the notification card as the topic root for native shared adopt', async () => {
+    const host = createLarkPluginHost('desktop-handoff', 'cli_app', {
+      kind: 'card-action',
+      operatorOpenId: 'ou_owner',
+      cardMessageId: 'om_plugin_root',
+    });
+    const ref = await host.sharedAdopt(pluginAdoptInput());
+
+    expect(mocks.routes).toHaveLength(0);
+    expect(mocks.createSession).toHaveBeenCalledWith(
+      'oc_workbench',
+      'om_plugin_root',
+      'Live task',
+      'group',
+      'thread',
+    );
+    expect(activeSessions.get(sessionKey('om_plugin_root', 'cli_app'))).toMatchObject({
+      worker: expect.any(Object),
+      session: {
+        cliSessionId: THREAD_ID,
+        existingAppServerEndpoint: mocks.existingEndpoint,
+      },
+    });
+    expect(ref).toEqual({
+      sessionId: 'sid-om_plugin_root',
+      threadId: THREAD_ID,
+      chatId: 'oc_workbench',
+      rootMessageId: 'om_plugin_root',
+    });
+  });
+
+  it('does not report native shared adopt success before the official worker is ready', async () => {
+    mocks.adoptionReady = 'delayed';
+    const host = createLarkPluginHost('desktop-handoff', 'cli_app', {
+      kind: 'card-action',
+      operatorOpenId: 'ou_owner',
+      cardMessageId: 'om_plugin_root',
+    });
+
+    await expect(host.sharedAdopt(pluginAdoptInput())).resolves.toMatchObject({ threadId: THREAD_ID });
+    expect(mocks.readyPublished).toBe(true);
+  });
+
+  it('refuses plugin shared adopt when no existing App Server is configured', async () => {
+    mocks.existingEndpoint = undefined;
+    const ctrl = new AbortController();
+    await expect(sharedAdoptEvent(
+      'cli_app',
+      EVENT,
+      'om_plugin_root',
+      'ou_owner',
+      ctrl.signal,
+      Date.now() + 2200,
+      { anchorMessageId: 'om_plugin_root' },
+    )).rejects.toThrow('existing_app_server_not_configured');
+    expect(mocks.createSession).not.toHaveBeenCalled();
+  });
+
+  it('serializes cards only through the receiving bot transport', async () => {
+    const host = createLarkPluginHost('desktop-handoff', 'cli_app', { kind: 'local-event' });
+    const card = { schema: '2.0', body: { elements: [] } };
+
+    await expect(host.sendCard({ chatId: 'oc_workbench', card, uuid: 'evt-1' }))
+      .resolves.toEqual({ messageId: 'om_sent' });
+    await expect(host.replyCard({ rootMessageId: 'om_root', card, uuid: 'evt-2' }))
+      .resolves.toEqual({ messageId: 'om_reply' });
+    await host.updateCard('om_root', card);
+
+    expect(mocks.sendMessage).toHaveBeenCalledWith(
+      'cli_app', 'oc_workbench', JSON.stringify(card), 'interactive', 'evt-1',
+    );
+    expect(mocks.replyMessage).toHaveBeenCalledWith(
+      'cli_app', 'om_root', JSON.stringify(card), 'interactive', true, 'evt-2',
+    );
+    expect(mocks.updateMessage).toHaveBeenCalledWith(
+      'cli_app', 'om_root', JSON.stringify(card),
+    );
+  });
+
+  it('maps a withdrawn topic root to a stable plugin-facing error', async () => {
+    const { MessageWithdrawnError } = await import('../src/im/lark/client.js');
+    mocks.replyMessage.mockRejectedValueOnce(new MessageWithdrawnError('om_root'));
+    const host = createLarkPluginHost('desktop-handoff', 'cli_app', { kind: 'local-event' });
+
+    await expect(host.replyCard({ rootMessageId: 'om_root', card: {}, uuid: 'evt-2' }))
+      .rejects.toThrow('lark_root_message_unavailable');
+  });
+
+  it('does not expose shared adopt to a local Hook event', async () => {
+    mocks.existingEndpoint = 'unix:///tmp/codex-app-server.sock';
+    const host = createLarkPluginHost('desktop-handoff', 'cli_app', { kind: 'local-event' });
+
+    await expect(host.sharedAdopt(pluginAdoptInput()))
+      .rejects.toThrow('shared_adopt_requires_card_action');
+    expect(mocks.createSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'a non-owner card operator',
+      { kind: 'card-action' as const, operatorOpenId: 'ou_other', cardMessageId: 'om_plugin_root' },
+      'shared_adopt_owner_required',
+    ],
+    [
+      'a different card callback',
+      { kind: 'card-action' as const, operatorOpenId: 'ou_owner', cardMessageId: 'om_other' },
+      'shared_adopt_card_mismatch',
+    ],
+  ])('rejects shared adopt from %s', async (_label, dispatchContext, error) => {
+    mocks.existingEndpoint = 'unix:///tmp/codex-app-server.sock';
+    const host = createLarkPluginHost('desktop-handoff', 'cli_app', dispatchContext);
+
+    await expect(host.sharedAdopt(pluginAdoptInput())).rejects.toThrow(error);
+    expect(mocks.createSession).not.toHaveBeenCalled();
   });
 });

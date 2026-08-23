@@ -381,10 +381,6 @@ vi.mock('../src/services/codex-app-threads.js', () => ({
   listCodexAppThreads: vi.fn(async () => []),
 }));
 
-vi.mock('../src/features/codex-notifier/desktop-ipc-client.js', () => ({
-  probeCodexDesktopThread: vi.fn(async () => 'codex-desktop-owner'),
-}));
-
 vi.mock('../src/core/command-discovery.js', () => ({
   discoverSlashCommandsForAdapter: vi.fn(() => [{ name: '/project-cmd', description: 'Project command' }]),
   supportsFilesystemCommandDiscovery: vi.fn((adapter: any) => !!(adapter?.claudeDataDir || adapter?.skillsDir || adapter?.pluginDir)),
@@ -517,7 +513,6 @@ import * as sessionStore from '../src/services/session-store.js';
 import * as scheduleStore from '../src/services/schedule-store.js';
 import * as scheduler from '../src/core/scheduler.js';
 import { deleteMessage, sendMessage, replyMessage, listChatBotMembers, getChatModeStrict, getMessageThreadId, UserTokenMissingError } from '../src/im/lark/client.js';
-import { probeCodexDesktopThread } from '../src/features/codex-notifier/desktop-ipc-client.js';
 import { buildAdoptSelectCard, buildSlashListCard, buildSessionClosedCard } from '../src/im/lark/card-builder.js';
 import { createGroupWithBots } from '../src/services/group-creator.js';
 import { getAllBots, getBot, findOncallChat, effectiveDefaultWorkingDir } from '../src/bot-registry.js';
@@ -4292,6 +4287,16 @@ describe('handleCommand', () => {
     });
 
     it('adopts an existing Codex App thread without overwriting its native title', async () => {
+      vi.mocked(getBot).mockImplementation(((id: string = 'app-1') => id === LARK_APP_ID
+        ? {
+            botName: 'Codex Remote',
+            config: {
+              ...defaultGetBot(id).config,
+              cliId: 'codex-app' as const,
+              existingAppServer: { endpoint: 'unix:///tmp/codex-app-server.sock' },
+            },
+          }
+        : defaultGetBot(id)) as any);
       const ds = makeDaemonSession({
         session: makeSession({
           nativeSessionTitle: '[BotMux·Lark] 旧飞书标题',
@@ -4309,9 +4314,9 @@ describe('handleCommand', () => {
       }, ds, deps, LARK_APP_ID);
 
       expect(ds.session).toMatchObject({
-        cliId: 'codex-app',
+        cliId: 'codex',
         cliSessionId: '01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35',
-        codexAppTransport: 'desktop-ipc',
+        existingAppServerEndpoint: 'unix:///tmp/codex-app-server.sock',
         title: 'Codex App: 原生 Codex 标题',
         workingDir: '/Users/test/AiProjects/project-a',
       });
@@ -4323,31 +4328,29 @@ describe('handleCommand', () => {
         sessionId: ds.session.sessionId,
         bot: expect.objectContaining({ larkAppId: LARK_APP_ID }),
       }));
-      expect(probeCodexDesktopThread).toHaveBeenCalledWith('01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35');
       expect(killWorker).toHaveBeenCalledWith(ds);
-      expect(forkWorker).not.toHaveBeenCalled();
+      expect(forkWorker).toHaveBeenCalledWith(ds, '', true);
     });
 
-    it('does not claim success or mutate the session when Codex Desktop does not own the thread', async () => {
+    it('does not mutate the session when the App Server endpoint is missing', async () => {
       const ds = makeDaemonSession();
       const deps = makeDeps(ds);
-      vi.mocked(probeCodexDesktopThread).mockRejectedValueOnce(new Error('Codex App 当前离线'));
 
-      await expect(startCodexAppThreadSession({
+      await startCodexAppThreadSession({
         threadId: '01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35',
         name: '原生 Codex 标题',
         preview: '已有会话内容',
         cwd: '/Users/test/AiProjects/project-a',
-      }, ds, deps, LARK_APP_ID)).rejects.toThrow('Codex App 当前离线');
+      }, ds, deps, LARK_APP_ID);
 
       expect(sessionStore.updateSession).not.toHaveBeenCalled();
       expect(killWorker).not.toHaveBeenCalled();
       expect(forkWorker).not.toHaveBeenCalled();
-      expect(deps.sessionReply).not.toHaveBeenCalledWith(
-        expect.any(String),
-        expect.stringContaining('已接管'),
-        expect.anything(),
-        expect.anything(),
+      expect(deps.sessionReply).toHaveBeenCalledWith(
+        ROOT_ID,
+        expect.stringContaining('未配置 Codex App Server'),
+        undefined,
+        LARK_APP_ID,
       );
     });
 
@@ -4687,42 +4690,6 @@ describe('handleCommand', () => {
       const replyArgs = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(replyArgs[2]).toBe('interactive');
       expect(replyArgs[1] as string).toContain('codex-app-thread-select');
-    });
-
-    it('should resume a selected Codex App thread directly', async () => {
-      mockCodexAppBot();
-      vi.mocked(listCodexAppThreads).mockResolvedValueOnce([
-        {
-          threadId: '01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35',
-          name: 'Fix botmux',
-          preview: 'fallback preview',
-          cwd: '/repo/botmux',
-          updatedAtMs: 1780000000000,
-        },
-      ]);
-      const ds = makeDaemonSession({
-        larkAppId: CODEX_APP_ID,
-        session: makeSession({ cliId: 'codex-app' as any }),
-      });
-      const deps = makeDeps(ds);
-
-      await handleCommand('/adopt', ROOT_ID, makeLarkMessage('/adopt 01936f7a'), deps, CODEX_APP_ID);
-
-      expect(discoverAdoptableSessions).not.toHaveBeenCalled();
-      expect(ds.adoptedFrom).toBeUndefined();
-      expect(ds.workingDir).toBe('/repo/botmux');
-      expect(ds.session.workingDir).toBe('/repo/botmux');
-      expect(ds.session.cliId).toBe('codex-app');
-      expect(ds.session.cliSessionId).toBe('01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35');
-      expect(ds.session.codexAppTransport).toBe('desktop-ipc');
-      expect(ds.session.adoptedFrom).toBeUndefined();
-      expect(sessionStore.updateSession).toHaveBeenCalledWith(ds.session);
-      expect(probeCodexDesktopThread).toHaveBeenCalledWith('01936f7a-0e7f-7e42-9e3e-b0ef5eb87f35');
-      expect(killWorker).toHaveBeenCalledWith(ds);
-      expect(forkWorker).not.toHaveBeenCalled();
-      const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
-      expect(replyContent).toContain('已继续 Codex App 对话');
-      expect(replyContent).toContain('Fix botmux');
     });
 
     it('attaches a Codex App bot to an existing App Server thread without changing its default runtime', async () => {

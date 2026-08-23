@@ -88,10 +88,6 @@ vi.mock('../src/services/codex-app-threads.js', () => ({
   listCodexAppThreads: vi.fn(async () => []),
 }));
 
-vi.mock('../src/features/codex-notifier/desktop-ipc-client.js', () => ({
-  probeCodexDesktopThread: vi.fn(async () => 'codex-desktop-owner'),
-}));
-
 vi.mock('../src/core/worker-pool.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/core/worker-pool.js')>();
   return {
@@ -163,7 +159,6 @@ import * as sessionStore from '../src/services/session-store.js';
 import { deleteMessage, getMessageDetail } from '../src/im/lark/client.js';
 import { getBot } from '../src/bot-registry.js';
 import { listCodexAppThreads } from '../src/services/codex-app-threads.js';
-import { probeCodexDesktopThread } from '../src/features/codex-notifier/desktop-ipc-client.js';
 import { sessionKey } from '../src/core/types.js';
 import type { DaemonSession } from '../src/core/types.js';
 
@@ -535,6 +530,7 @@ describe('Adopt card actions', () => {
           larkAppSecret: 'secret',
           cliId: 'codex-app',
           cliPathOverride: '/opt/codex',
+          existingAppServer: { endpoint: 'unix:///tmp/codex-app-server.sock' },
         },
         resolvedAllowedUsers: [],
         botOpenId: 'ou_bot',
@@ -560,13 +556,12 @@ describe('Adopt card actions', () => {
       expect(ds.adoptedFrom).toBeUndefined();
       expect(ds.workingDir).toBe('/repo/codex-app');
       expect(ds.session.cliSessionId).toBe(CODEX_THREAD_ID);
-      expect(ds.session.cliId).toBe('codex-app');
-      expect(ds.session.codexAppTransport).toBe('desktop-ipc');
+      expect(ds.session.cliId).toBe('codex');
+      expect(ds.session.existingAppServerEndpoint).toBe('unix:///tmp/codex-app-server.sock');
       expect(ds.session.adoptedFrom).toBeUndefined();
       expect(sessionStore.updateSession).toHaveBeenCalledWith(ds.session);
-      expect(probeCodexDesktopThread).toHaveBeenCalledWith(CODEX_THREAD_ID);
       expect(killWorker).toHaveBeenCalledWith(ds);
-      expect(forkWorker).not.toHaveBeenCalled();
+      expect(forkWorker).toHaveBeenCalledWith(ds, '', true);
       expect(deleteMessage).toHaveBeenCalledWith(APP_ID, 'om_card_msg');
     });
 
