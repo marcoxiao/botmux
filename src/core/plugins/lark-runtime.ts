@@ -84,7 +84,10 @@ export interface LarkPluginDispatcher {
     data: LarkCardAction,
     context: LarkCardActionContext,
   ): Promise<{ handled: false } | { handled: true; result: unknown }>;
-  dispatchMessage(context: LarkPluginMessageContext): Promise<{ handled: boolean }>;
+  dispatchMessage(
+    context: LarkPluginMessageContext,
+    ownerPluginId?: string,
+  ): Promise<{ handled: boolean }>;
 }
 
 export function createLarkPluginDispatcher(
@@ -125,8 +128,11 @@ export function createLarkPluginDispatcher(
       );
       return { handled: true, result };
     },
-    async dispatchMessage(context) {
-      for (const loaded of plugins) {
+    async dispatchMessage(context, ownerPluginId) {
+      const candidates = ownerPluginId
+        ? [byId.get(ownerPluginId)].filter((entry): entry is LoadedLarkPlugin => !!entry)
+        : plugins;
+      for (const loaded of candidates) {
         const handler = loaded.plugin.handleMessage;
         if (!handler) continue;
         const result = await handler(

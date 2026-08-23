@@ -2281,7 +2281,15 @@ export interface EventHandlers {
   handleThreadReply: (data: any, ctx: RoutingContext) => Promise<void>;
   /** Give enabled plugins first refusal over an allowed human reply inside a
    *  real Lark topic. A claimed message never falls through to native routing. */
-  handlePluginMessage?: (context: LarkPluginMessageContext) => Promise<boolean>;
+  handlePluginMessage?: (
+    context: LarkPluginMessageContext,
+    ownerPluginId?: string,
+  ) => Promise<boolean>;
+  resolvePluginMessageClaim?: (
+    larkAppId: string,
+    messageIdentity: string,
+  ) => { pluginId: string; rootMessageId: string } | undefined;
+  hasPluginClaimedChat?: (larkAppId: string, chatId: string) => boolean;
   /** 主动开工 — 场景①: fired when this bot is added to a chat
    *  (`im.chat.member.bot.added_v1`). The daemon decides whether to auto-start
    *  based on the bot's `autoStartOnGroupJoin` toggle + allowedUser membership.
@@ -2327,25 +2335,44 @@ export async function dispatchPluginTopicMessage(
     senderOpenId?: string;
     talkAllowed: boolean;
   },
-  handle?: (context: LarkPluginMessageContext) => Promise<boolean>,
+  handle?: (context: LarkPluginMessageContext, ownerPluginId?: string) => Promise<boolean>,
+  resolveClaim?: (
+    larkAppId: string,
+    messageIdentity: string,
+  ) => { pluginId: string; rootMessageId: string } | undefined,
+  hasClaimedChat?: (larkAppId: string, chatId: string) => boolean,
 ): Promise<boolean> {
-  if (!handle || !input.talkAllowed || !input.senderOpenId) return false;
-  const rootMessageId = input.message?.root_id;
   const threadId = input.message?.thread_id;
-  if (typeof rootMessageId !== 'string' || !rootMessageId) return false;
   if (typeof threadId !== 'string' || !threadId) return false;
+  const rawRootMessageId = input.message?.root_id;
+  const messageIdentity = typeof rawRootMessageId === 'string' && rawRootMessageId
+    ? rawRootMessageId
+    : threadId;
+  if (typeof messageIdentity !== 'string' || !messageIdentity) return false;
+  const claim = resolveClaim?.(input.larkAppId, messageIdentity);
+  if (!claim && !rawRootMessageId && hasClaimedChat?.(input.larkAppId, input.chatId)) {
+    logger.warn(
+      `[plugin-message] rootless topic alias ${threadId.substring(0, 12)} is not resolved; `
+      + `consuming in claimed chat ${input.chatId.substring(0, 12)} without native fallback`,
+    );
+    return true;
+  }
+  const rootMessageId = claim?.rootMessageId ?? messageIdentity;
+  if (!input.senderOpenId) return !!claim;
+  if (!input.talkAllowed || !handle) return !!claim;
   const routingText = extractMessageTextForRouting(input.message);
   const text = routingText
     ? stripLeadingMentions(routingText.trim(), input.message?.mentions ?? []).trim()
     : '';
-  return handle({
+  const handled = await handle({
     larkAppId: input.larkAppId,
     chatId: input.chatId,
     messageId: input.messageId,
     rootMessageId,
     senderOpenId: input.senderOpenId,
     text,
-  });
+  }, claim?.pluginId);
+  return handled || !!claim;
 }
 
 /** 一条已通过订阅 + 触发范围 + 自触发过滤的文档评论，交给 daemon 投递。 */
@@ -3661,7 +3688,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         message,
         senderOpenId,
         talkAllowed: isAllowed,
-      }, handlers.handlePluginMessage)) {
+      }, handlers.handlePluginMessage, handlers.resolvePluginMessageClaim, handlers.hasPluginClaimedChat)) {
         return;
       }
       let pairedForwardSeed;

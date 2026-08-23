@@ -7,8 +7,8 @@
 ## Task 1: Core 通用消息认领
 
 - [x] 增加规范化 `LarkPluginMessageContext` 与可选 `handleMessage`。
-- [x] 只在真实人类、talkAllowed、真实话题和消息去重后调用。
-- [x] 首个 handled 停止原生路由，异常传播且不静默 fallback。
+- [x] 兼容 `root_id + thread_id` 与 rootless `thread_id` 话题事件，复用原生身份、权限和消息去重。
+- [x] 首个 handled 停止原生路由；exclusive root/alias 在插件禁用、重配或缺失时仍持久 fail-closed。
 - [x] 无 Codex IPC、route 或 provider 业务进入 Core。
 
 ## Task 2: 插件 Desktop IPC 与 route
@@ -17,6 +17,7 @@
 - [x] 校验 Unix socket 类型、同 UID、帧上限、超时和 pending 清理。
 - [x] 实现 owner discovery 与 follower start turn。
 - [x] route 生命周期独立于短期 event 清理，根撤回时清理。
+- [x] Hook 仅按 Desktop thread 串行；CardKit 与飞书消息不进入全局内存队列。
 
 ## Task 3: CardKit 闭环
 
@@ -24,6 +25,7 @@
 - [x] 已知根话题对未接管、非 owner、空文本和离线 fail-closed。
 - [x] 目标 threadId 只来自账本，飞书 messageId 作为原生幂等 ID。
 - [x] 完成结果与错误卡都回复同一根 CardKit 话题。
+- [x] 区分明确离线与 turn 写出后的“送达待确认”，避免误导重发造成重复执行。
 
 ## Task 4: 上游合并与自动回归
 

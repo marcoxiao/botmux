@@ -53,7 +53,8 @@ import {
 } from './core/supervisor-shutdown-protocol.js';
 import { readSupervisorProcessStartIdentity } from './core/process-start-identity.js';
 import { statSync } from 'node:fs';
-import { addReaction, deleteMessage, getChatContext, getChatMode, getChatModeStrict, getChatNameAndMode, getMessageChatId, listChatMemberOpenIds, MessageWithdrawnError, replyMessage, resolveAllowedUsersWithMap, sendMessage, sendUserMessage, updateMessage, type EntryResolveStatus } from './im/lark/client.js';
+import { addReaction, deleteMessage, getChatContext, getChatMode, getChatModeStrict, getChatNameAndMode, getMessageChatId, getMessageThreadId, listChatMemberOpenIds, MessageWithdrawnError, replyMessage, resolveAllowedUsersWithMap, sendMessage, sendUserMessage, updateMessage, type EntryResolveStatus } from './im/lark/client.js';
+import { LarkPluginMessageClaimStore } from './core/plugins/lark-message-claims.js';
 import { resolveGroupJoinPrompt, waitForAllowedUserInChat } from './core/auto-start.js';
 import {
   loadBotConfigAtIndex,
@@ -5387,7 +5388,7 @@ function createLarkPluginHost(
 ): LarkPluginHost {
   return {
     config: createPluginConfigApi(pluginId),
-    async sendCard({ chatId, card, uuid }) {
+    async sendCard({ chatId, card, uuid, replyClaim }) {
       const messageId = await sendMessage(
         larkAppId,
         chatId,
@@ -5395,6 +5396,22 @@ function createLarkPluginHost(
         'interactive',
         uuid,
       );
+      if (replyClaim === 'exclusive') {
+        let threadId: string | null = null;
+        for (const waitMs of [0, 100, 300]) {
+          if (waitMs) await delay(waitMs);
+          threadId = await getMessageThreadId(larkAppId, messageId);
+          if (threadId) break;
+        }
+        if (!threadId) throw new Error('lark_plugin_reply_claim_thread_unavailable');
+        new LarkPluginMessageClaimStore().claim({
+          pluginId,
+          larkAppId,
+          chatId,
+          rootMessageId: messageId,
+          aliases: [threadId],
+        });
+      }
       return { messageId };
     },
     async replyCard({ rootMessageId, card, uuid }) {
@@ -22105,10 +22122,14 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       ),
       handleNewTopic: (data, ctx) => handleNewTopic(data, ctx),
       handleThreadReply: (data, ctx) => handleThreadReply(data, ctx),
-      handlePluginMessage: async (context) => {
+      handlePluginMessage: async (context, ownerPluginId) => {
         const { dispatcher } = await loadDaemonLarkPluginDispatcher(context.larkAppId);
-        return (await dispatcher.dispatchMessage(context)).handled;
+        return (await dispatcher.dispatchMessage(context, ownerPluginId)).handled;
       },
+      resolvePluginMessageClaim: (appId, messageIdentity) =>
+        new LarkPluginMessageClaimStore().resolve(appId, messageIdentity),
+      hasPluginClaimedChat: (appId, chatId) =>
+        new LarkPluginMessageClaimStore().hasExclusiveChat(appId, chatId),
       handleBotAdded: (chatId, operatorOpenId, appId) => withBotTurnAdmission(
         appId,
         () => handleBotAdded(chatId, operatorOpenId, appId),

@@ -47,6 +47,10 @@ export function pluginServicePm2ConfigPath(pluginId: string): string {
   return join(pluginHome(pluginId), 'service.pm2.json');
 }
 
+export function larkPluginMessageClaimsPath(): string {
+  return join(botmuxHome(), 'lark-plugin-message-claims.json');
+}
+
 export function pluginMaterializedPath(pluginId: string): string {
   return join(pluginHome(pluginId), 'materialized.json');
 }

@@ -28,11 +28,28 @@ describe('Lark plugin topic message routing', () => {
       rootMessageId: 'om_root',
       senderOpenId: 'ou_owner',
       text: '从飞书继续',
-    });
+    }, undefined);
+  });
+
+  it('uses thread_id as the root identity for Lark\'s send-to-chat topic shape', async () => {
+    const handle = vi.fn(async () => true);
+    const resolve = vi.fn(() => ({ pluginId: 'desktop-handoff', rootMessageId: 'om_root' }));
+
+    for (const root_id of [undefined, '']) {
+      await expect(dispatchPluginTopicMessage({
+        ...base,
+        message: { ...base.message, root_id, thread_id: 'omt_thread' },
+      }, handle, resolve)).resolves.toBe(true);
+    }
+    expect(handle).toHaveBeenCalledTimes(2);
+    expect(handle).toHaveBeenLastCalledWith(
+      expect.objectContaining({ rootMessageId: 'om_root' }),
+      'desktop-handoff',
+    );
   });
 
   it.each([
-    ['no root', { message: { ...base.message, root_id: undefined } }],
+    ['no topic identity', { message: { ...base.message, root_id: undefined, thread_id: undefined } }],
     ['no thread', { message: { ...base.message, thread_id: undefined } }],
     ['not allowed', { talkAllowed: false }],
     ['no sender', { senderOpenId: undefined }],
@@ -45,5 +62,32 @@ describe('Lark plugin topic message routing', () => {
 
   it('returns false when no enabled plugin implements message handling', async () => {
     await expect(dispatchPluginTopicMessage(base, undefined)).resolves.toBe(false);
+  });
+
+  it('fails closed for a persistently claimed root when its plugin is disabled', async () => {
+    const claimed = vi.fn(() => ({ pluginId: 'desktop-handoff', rootMessageId: 'om_root' }));
+
+    await expect(dispatchPluginTopicMessage(base, undefined, claimed)).resolves.toBe(true);
+    expect(claimed).toHaveBeenCalledWith('cli_bot', 'om_root');
+  });
+
+  it('fails closed for a claimed root before ordinary authorization routing', async () => {
+    const claimed = vi.fn(() => ({ pluginId: 'desktop-handoff', rootMessageId: 'om_root' }));
+
+    await expect(dispatchPluginTopicMessage(
+      { ...base, talkAllowed: false },
+      undefined,
+      claimed,
+    )).resolves.toBe(true);
+  });
+
+  it('fails closed for an unresolved rootless alias inside an exclusive plugin chat', async () => {
+    const handle = vi.fn(async () => false);
+
+    await expect(dispatchPluginTopicMessage({
+      ...base,
+      message: { ...base.message, root_id: '', thread_id: 'omt_unresolved' },
+    }, handle, () => undefined, () => true)).resolves.toBe(true);
+    expect(handle).not.toHaveBeenCalled();
   });
 });

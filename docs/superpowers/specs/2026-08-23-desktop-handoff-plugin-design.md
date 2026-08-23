@@ -75,8 +75,9 @@ BotMux 通用 Lark 插件入口
 ### Core 只负责
 
 - 加载已启用插件并提供 CardKit、owner、配置和打开 App 的窄 Host。
-- 对通过原生人类身份、talk 权限、去重和真实 `root_id + thread_id` 校验的消息，给插件一次认领机会。
-- 首个 `{ handled: true }` 终止原生 Session 创建；全部 false 时原逻辑不变。
+- 对通过原生人类身份、去重和 `thread_id` 话题校验的消息，使用 `root_id ?? thread_id` 给插件一次认领机会，覆盖飞书“话题内发送并同时发送到会话”的 rootless 事件。
+- 插件可在发送根卡时声明 `replyClaim: 'exclusive'`；Host 必须从飞书解析并 crash-durable 保存 `(pluginId, larkAppId, chatId, root/alias)` 后才返回成功，不保存 Desktop 业务状态。
+- 首个 `{ handled: true }` 终止原生 Session 创建；全部 false 时仅未知根沿原逻辑继续。已声明的根即使插件禁用、重配或缺失也 fail-closed。
 
 ### 插件负责
 
@@ -112,9 +113,10 @@ interface LarkPluginV1 {
 }
 ```
 
-调用前置条件由 Core 固定：真实人类、talkAllowed、真实话题回复、现有消息去重、复用现有文本提取与前导 @ 清理。插件仍校验 owner 和自身根 route。
+调用前置条件由 Core 固定：真实人类、真实话题回复、现有消息去重、复用现有文本提取与前导 @ 清理。普通消息仍遵循 talkAllowed；exclusive claim 在授权失败或插件缺失时直接消费，不能回落原生 Session。插件仍校验 owner 和自身根 route。
 
 消息认领 fail-closed：根消息命中插件账本后，即使未接管、非 owner、空文本、IPC 离线或 provider 抛错，也返回 `handled: true`；只有根消息不属于插件才返回 false。
+若飞书给出 rootless `thread_id` 且别名尚未解析，专用工作台已存在 exclusive claim 时 Core 直接消费并告警，宁可拒绝本次输入也不创建错误 Session。
 
 ## 6. 关键流程
 
@@ -138,7 +140,7 @@ interface LarkPluginV1 {
 2. Core 调用插件 `handleMessage`。
 3. 插件按根消息找到 route，再次发现当前 Desktop owner。
 4. 插件调用 `thread-follower-start-turn`，目标 threadId 来自账本，`clientUserMessageId` 使用飞书 messageId。
-5. Desktop 离线时回复错误卡，不排队、不 fallback。
+5. Desktop 明确离线时回复错误卡，不排队、不 fallback；turn 已写出后若 ACK 超时或断连，标记“送达待确认”，提示先查看 Desktop、不要立即重发。
 
 ## 7. 一致性与安全
 
@@ -147,7 +149,7 @@ interface LarkPluginV1 {
 - forwarded/copied CardKit 因 `open_message_id` 不匹配账本根卡而拒绝。
 - 非 owner 即使拥有群聊权限也不能接管或写入 Desktop。
 - IPC 固定本机 Codex socket，不接受飞书 payload 提供路径、threadId 或命令。
-- socket 必须是同 UID 的 Unix socket；单帧 64 MiB；请求超时 5 秒；连接/关闭/无 owner 统一映射为离线。
+- socket 必须是同 UID 的 Unix socket；单帧 64 MiB；请求超时 5 秒。连接前失败/无 owner 映射为离线；turn 写出后的超时或断连映射为送达待确认，避免误导用户重复执行。
 - 不记录飞书正文、凭证、socket 数据或完整 thread 标识。
 
 ## 8. CardKit 用户体验
@@ -155,7 +157,7 @@ interface LarkPluginV1 {
 - 未接管：完成摘要、“飞书接管”、“打开 Codex App”。
 - 已接管：提示回复本话题会进入同一个 Desktop 任务。
 - 成功送达不刷屏；最终结果回同一话题。
-- 离线只说明打开原任务后重发，不暴露内部协议或堆栈。
+- 明确离线才说明打开原任务后重发；送达待确认要求先查看 Desktop。两者都不暴露内部协议或堆栈。
 - 手机端与桌面端共用同一根卡/话题，不要求记命令。
 
 本期闭环按 turn 粒度定义，不承诺 token/item 级实时流。

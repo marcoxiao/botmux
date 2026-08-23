@@ -49,6 +49,9 @@ export interface LarkPluginHost {
     chatId: string;
     card: Record<string, unknown>;
     uuid?: string;
+    /** Replies to this root are owned exclusively by this plugin. The durable
+     * claim remains fail-closed even while the plugin is disabled. */
+    replyClaim?: 'exclusive';
   }): Promise<{ messageId: string }>;
   replyCard(input: {
     rootMessageId: string;

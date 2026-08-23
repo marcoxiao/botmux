@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   sendMessage: vi.fn(async () => 'om_sent'),
   replyMessage: vi.fn(async () => 'om_reply'),
   updateMessage: vi.fn(async () => undefined),
+  claim: vi.fn(),
   adoptionReady: 'immediate' as 'immediate' | 'delayed',
   readyPublished: false,
 }));
@@ -26,6 +27,7 @@ vi.mock('../src/im/lark/client.js', async () => {
   return {
     ...actual,
     getMessageChatId: vi.fn(async () => mocks.chatId),
+    getMessageThreadId: vi.fn(async () => 'omt_plugin_thread'),
     getChatModeStrict: vi.fn(async () => mocks.chatMode),
     sendMessage: mocks.sendMessage,
     replyMessage: mocks.replyMessage,
@@ -65,7 +67,8 @@ vi.mock('../src/services/session-store.js', async () => {
     scope,
     status: 'active',
     createdAt: '2026-08-23T08:00:00.000Z',
-  }));
+}));
+
   return {
     ...actual,
     createSession: mocks.createSession,
@@ -73,6 +76,14 @@ vi.mock('../src/services/session-store.js', async () => {
     closeSession: vi.fn(),
   };
 });
+
+vi.mock('../src/core/plugins/lark-message-claims.js', () => ({
+  LarkPluginMessageClaimStore: class {
+    claim(input: unknown) { mocks.claim(input); }
+    resolve() { return undefined; }
+    hasExclusiveChat() { return false; }
+  },
+}));
 
 vi.mock('../src/features/codex-notifier/index.js', async () => {
   const actual = await vi.importActual<any>('../src/features/codex-notifier/index.js');
@@ -167,6 +178,7 @@ describe('Codex notifier group topic adoption', () => {
     mocks.readyPublished = false;
     mocks.chatId = 'oc_workbench';
     mocks.chatMode = 'topic';
+    mocks.claim.mockClear();
   });
 
   it('binds a later completion card to the authoritative topic root', async () => {
@@ -262,6 +274,9 @@ describe('Codex notifier group topic adoption', () => {
 
     await expect(host.sendCard({ chatId: 'oc_workbench', card, uuid: 'evt-1' }))
       .resolves.toEqual({ messageId: 'om_sent' });
+    await expect(host.sendCard({
+      chatId: 'oc_workbench', card, uuid: 'evt-claimed', replyClaim: 'exclusive',
+    })).resolves.toEqual({ messageId: 'om_sent' });
     await expect(host.replyCard({ rootMessageId: 'om_root', card, uuid: 'evt-2' }))
       .resolves.toEqual({ messageId: 'om_reply' });
     await host.updateCard('om_root', card);
@@ -269,6 +284,13 @@ describe('Codex notifier group topic adoption', () => {
     expect(mocks.sendMessage).toHaveBeenCalledWith(
       'cli_app', 'oc_workbench', JSON.stringify(card), 'interactive', 'evt-1',
     );
+    expect(mocks.claim).toHaveBeenCalledWith({
+      pluginId: 'desktop-handoff',
+      larkAppId: 'cli_app',
+      chatId: 'oc_workbench',
+      rootMessageId: 'om_sent',
+      aliases: ['omt_plugin_thread'],
+    });
     expect(mocks.replyMessage).toHaveBeenCalledWith(
       'cli_app', 'om_root', JSON.stringify(card), 'interactive', true, 'evt-2',
     );

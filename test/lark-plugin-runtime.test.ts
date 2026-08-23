@@ -121,6 +121,15 @@ describe('lark plugin runtime', () => {
     expect((globalThis as any).__unreachableMessage).toBeUndefined();
     delete (globalThis as any).__observerMessage;
     delete (globalThis as any).__desktopMessage;
+
+    await expect(dispatcher.dispatchMessage(context, 'desktop-handoff'))
+      .resolves.toEqual({ handled: true });
+    expect((globalThis as any).__observerMessage).toBeUndefined();
+    expect((globalThis as any).__desktopMessage).toEqual({
+      context,
+      host: { pluginId: 'desktop-handoff', dispatchContext: { kind: 'message' } },
+    });
+    delete (globalThis as any).__desktopMessage;
   });
 
   it('does not swallow a message handler error and accidentally fall back', async () => {
