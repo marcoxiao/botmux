@@ -43,7 +43,7 @@ describe('Semantic Progress workspace integration', () => {
     expect(existsSync(resolve(plugin, 'pnpm-lock.yaml'))).toBe(false);
   });
 
-  it('keeps the fixed source entry and original test surface', async () => {
+  it('keeps the fixed source entry and plugin test surface', async () => {
     const srcEntries = await readdir(resolve(plugin, 'src'), { withFileTypes: true });
     expect(srcEntries.map(entry => entry.name).sort()).toEqual([
       'card.ts',
@@ -62,6 +62,7 @@ describe('Semantic Progress workspace integration', () => {
 
     const testEntries = await readdir(resolve(plugin, 'test'), { withFileTypes: true });
     expect(testEntries.map(entry => entry.name).sort()).toEqual([
+      'build-output.test.ts',
       'card.test.ts',
       'reducer.test.ts',
     ]);
@@ -126,11 +127,18 @@ describe('Semantic Progress workspace integration', () => {
   });
 
   it('runs both plugin test suites explicitly in CI after the build', async () => {
-    const ci = await readFile(resolve(root, '.github', 'workflows', 'ci.yml'), 'utf8');
-    const build = ci.indexOf('- run: pnpm build');
-    const semanticTest = ci.indexOf('- run: pnpm semantic-progress:test');
-    const desktopTest = ci.indexOf('- run: pnpm desktop-handoff:test');
-    expect(build).toBeGreaterThanOrEqual(0);
+    const ci = parse(await readFile(resolve(root, '.github', 'workflows', 'ci.yml'), 'utf8')) as {
+      jobs?: { build?: { steps?: Array<{ run?: unknown }> } };
+    };
+    const runs = (ci.jobs?.build?.steps ?? [])
+      .map(step => step.run)
+      .filter((run): run is string => typeof run === 'string');
+    const build = runs.indexOf('pnpm build');
+    const semanticTest = runs.indexOf('pnpm semantic-progress:test');
+    const desktopTest = runs.indexOf('pnpm desktop-handoff:test');
+    expect(runs.filter(run => run === 'pnpm build')).toHaveLength(1);
+    expect(runs.filter(run => run === 'pnpm semantic-progress:test')).toHaveLength(1);
+    expect(runs.filter(run => run === 'pnpm desktop-handoff:test')).toHaveLength(1);
     expect(semanticTest).toBeGreaterThan(build);
     expect(desktopTest).toBeGreaterThan(build);
   });
