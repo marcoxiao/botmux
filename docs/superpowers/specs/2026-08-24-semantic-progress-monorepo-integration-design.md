@@ -100,9 +100,13 @@ BotMux 根 `package.json` 增加显式脚本：
 
 ## 6. 运行时切换
 
-源码、锁文件、专项测试和构建全部通过后，先进入部署静默点：两个 Bot 的 heartbeat `busyCount` 均为 `0`，没有 active/finalizing Turn Progress binding，也没有正在执行的 Desktop Handoff follower。若任一条件不成立，等待当前轮完成，不强制中断用户任务。
+本次是一次性仓库迁移，不为它新增常驻的全局 admission freeze、插件 active-count 查询或第二套部署状态机。现有 heartbeat 的 `busyCount` 只覆盖普通 worker，Desktop Handoff follower 状态又只存在于插件进程内；因此不能把两者包装成一个实际上不可验证的“无损静默点”。
 
-静默点成立后，使用 BotMux 现有原子安装器，以相同插件 ID 更新本地 link：
+运行时切换必须在用户明确批准的短维护窗口内执行，并明确接受两个 Bot 的短暂不可用，不承诺零中断。当前两个 Bot 都只配置了一个允许用户，因此窗口开始前由该用户确认：Codex/TraeX 没有正在执行或等待输入的普通任务，也没有正在执行的 Desktop Handoff 往返；从确认开始到验收完成，不再从飞书或桌面端发起正常业务任务。daemon 重启后只允许本设计列出的受控验收消息，逐项等待其结束后再继续。若未来准入范围扩大到其他用户或自动化入口，必须先在入口侧暂停它们，不能沿用单用户确认。
+
+确认后立即执行 `botmux stop`，以 daemon 完全退出作为新请求入口已关闭的可执行边界。若停止期间发现仍有活跃任务、超时或非正常退出，终止迁移，恢复服务并重新约维护窗口；不得带着不确定状态切换运行时。源码、锁文件、专项测试和构建可以提前完成，但 link 切换、重启验收和旧仓清理只能在该维护窗口内进行。
+
+daemon 停止后，使用 BotMux 现有原子安装器，以相同插件 ID 更新本地 link：
 
 ```sh
 botmux plugin install ./plugins/semantic-progress --link
@@ -120,7 +124,7 @@ botmux plugin install ./plugins/semantic-progress --link
 - 重启后的新 session/generation manifest 仍包含相同 plugin IDs。
 - Semantic Progress 未声明 service，且没有以该插件 ID 或旧仓路径启动的独立进程。
 
-BotMux 重启仅用于让新 generation 重新物化插件清单，不改飞书凭证、会话或 Handoff 账本。
+随后启动 BotMux，让新 generation 重新物化插件清单；该过程不改飞书凭证、会话或 Handoff 账本。这里保证的是“显式停机边界内完成可回滚切换”，不是对切换前已存在任务做无法证明的无损迁移。维护窗口不能在第一次运行态验收后提前结束，必须持续到旧仓进入废纸篓、旧路径缺失后的冷启动和双 Bot 最小 smoke 全部通过。
 
 ## 7. Dashboard 管理体验校正
 
@@ -169,9 +173,9 @@ BotMux 重启仅用于让新 generation 重新物化插件清单，不改飞书�
 
 原仓 3 个提交已通过第二父提交进入 BotMux 历史，因此删除工作目录不会丢失代码历史。
 
-旧仓移入废纸篓后，按绝对路径缺失的状态再做一次 BotMux 冷启动、registry/link/session manifest 检查和双 Bot 最小 smoke，专门暴露隐藏旧路径依赖。若失败，从废纸篓恢复旧仓并用安装器切回，保留失败证据；不在代码中增加双路径 fallback。
+旧仓移入废纸篓后，在同一维护窗口内按绝对路径缺失的状态再做一次 BotMux 冷启动、registry/link/session manifest 检查和双 Bot 最小 smoke，专门暴露隐藏旧路径依赖。若失败，先执行 `botmux stop` 并确认 daemon 完全退出，再从废纸篓恢复旧仓、用安装器切回 link、恢复服务并保留失败证据；不在代码中增加双路径 fallback。只有该冷启动和 smoke 通过，维护窗口才结束，正常业务流量才恢复。
 
-若在运行时切换前发生失败，不修改现有软链。若切换后、旧仓移动前发生失败，使用安装器把 link 临时切回旧仓并停止清理。
+若在运行时切换前发生失败，不修改现有软链。若切换后、旧仓移动前发生失败，在同一维护窗口内再次停止 daemon，使用安装器把 link 临时切回旧仓，恢复服务并停止清理。
 
 ## 10. 非目标
 
@@ -192,4 +196,5 @@ BotMux 重启仅用于让新 generation 重新物化插件清单，不改飞书�
 - Dashboard 对两个插件的能力与启用范围描述准确。
 - 旧独立仓已进入废纸篓，仓库外无残留构建来源或兼容分叉。
 - 旧仓路径缺失后的冷启动与双 Bot smoke 通过；历史在 BotMux Git 图中完整可达，废纸篓在远端/干净 clone 验证前不清空。
+- 运行时切换在已记录的单用户维护窗口内完成；停止前无普通任务、等待输入或 Handoff 往返，daemon 完全退出后才替换 link，验收结束前只有逐项完成的受控验收消息进入。
 - 实现与本设计逐项一致，深度 Review 未发现不必要抽象、重复逻辑或遗漏边界。
