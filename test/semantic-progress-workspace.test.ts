@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
 const root = resolve(import.meta.dirname, '..');
@@ -16,6 +17,7 @@ describe('Semantic Progress workspace integration', () => {
       name?: string;
       version?: string;
       private?: boolean;
+      files?: string[];
       scripts?: Record<string, string>;
       botmux?: { id?: string; displayName?: string };
     };
@@ -23,6 +25,7 @@ describe('Semantic Progress workspace integration', () => {
       name: '@botmux-ai/plugin-semantic-progress',
       version: '0.1.0',
       private: true,
+      files: ['dist'],
       botmux: {
         id: 'semantic-progress',
         displayName: 'Semantic Progress',
@@ -36,7 +39,52 @@ describe('Semantic Progress workspace integration', () => {
       default?: { test?: { include?: string[] } };
     };
     expect(vitest.default?.test?.include).toEqual(['test/**/*.test.ts']);
+    expect(existsSync(resolve(plugin, '.gitignore'))).toBe(false);
     expect(existsSync(resolve(plugin, 'pnpm-lock.yaml'))).toBe(false);
+  });
+
+  it('keeps the fixed source entry and original test surface', async () => {
+    const srcEntries = await readdir(resolve(plugin, 'src'), { withFileTypes: true });
+    expect(srcEntries.map(entry => entry.name).sort()).toEqual([
+      'card.ts',
+      'reducer.ts',
+      'turn-progress',
+    ]);
+    expect(srcEntries.find(entry => entry.name === 'card.ts')?.isFile()).toBe(true);
+    expect(srcEntries.find(entry => entry.name === 'reducer.ts')?.isFile()).toBe(true);
+    expect(srcEntries.find(entry => entry.name === 'turn-progress')?.isDirectory()).toBe(true);
+
+    const entryEntries = await readdir(resolve(plugin, 'src', 'turn-progress'), {
+      withFileTypes: true,
+    });
+    expect(entryEntries.map(entry => entry.name)).toEqual(['index.ts']);
+    expect(entryEntries[0]?.isFile()).toBe(true);
+
+    const testEntries = await readdir(resolve(plugin, 'test'), { withFileTypes: true });
+    expect(testEntries.map(entry => entry.name).sort()).toEqual([
+      'card.test.ts',
+      'reducer.test.ts',
+    ]);
+    expect(testEntries.every(entry => entry.isFile())).toBe(true);
+    expect(existsSync(resolve(plugin, 'src', 'turn-progress', 'index.ts'))).toBe(true);
+  });
+
+  it('keeps the root lock importers aligned with actual plugin workspace packages', async () => {
+    const lock = parse(await readFile(resolve(root, 'pnpm-lock.yaml'), 'utf8')) as {
+      importers?: Record<string, unknown>;
+    };
+    expect(lock.importers).toHaveProperty('plugins/semantic-progress');
+
+    const pluginEntries = await readdir(resolve(root, 'plugins'), { withFileTypes: true });
+    const workspacePackages = pluginEntries
+      .filter(entry => entry.isDirectory())
+      .map(entry => `plugins/${entry.name}`)
+      .filter(importer => existsSync(resolve(root, importer, 'package.json')))
+      .sort();
+    const pluginImporters = Object.keys(lock.importers ?? {})
+      .filter(importer => importer.startsWith('plugins/'))
+      .sort();
+    expect(pluginImporters).toEqual(workspacePackages);
   });
 
   it('documents monorepo development and link installation without the old checkout', async () => {
