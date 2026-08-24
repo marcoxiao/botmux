@@ -83,6 +83,8 @@ interface ManagedPlugin {
     dashboard?: Array<{ id: string; route: string; entry: string }>;
     cli?: { entry?: string; commands?: PluginCliCommand[] };
     service?: { entry?: string; mode?: string };
+    turnProgress?: { entry?: string };
+    lark?: { entry?: string };
   };
   dependencies?: string[];
   skillsCount?: number;
@@ -628,18 +630,21 @@ function PluginBotSettings(props: {
   );
 }
 
-function PluginCapabilitySummary(props: {
+export function PluginCapabilitySummary(props: {
   plugin: ManagedPlugin;
   globalEnabled: boolean;
   enabledBotCount: number;
   botCount: number;
 }): React.JSX.Element {
-  const commands = props.plugin.contributions?.cli?.commands ?? [];
+  const contributions = props.plugin.contributions;
+  const commands = contributions?.cli?.commands ?? [];
   const capabilities = [
     { label: 'Skills', count: props.plugin.skillsCount ?? 0 },
     { label: 'MCP', count: props.plugin.mcpCount ?? 0 },
     { label: '命令', count: commands.length },
     { label: 'Dashboard', count: props.plugin.dashboard?.length ?? 0 },
+    { label: '进度卡', count: contributions?.turnProgress ? 1 : 0 },
+    { label: '飞书协同', count: contributions?.lark ? 1 : 0 },
   ].filter(item => item.count > 0);
   return (
     <div className="plugin-card-summary">
