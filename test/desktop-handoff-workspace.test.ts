@@ -28,6 +28,7 @@ describe('Desktop Handoff workspace integration', () => {
     });
     expect(existsSync(resolve(plugin, 'src', 'lark', 'index.ts'))).toBe(true);
     expect(existsSync(resolve(plugin, 'test', 'lark.test.ts'))).toBe(true);
+    expect(existsSync(resolve(plugin, 'vitest.config.ts'))).toBe(true);
     expect(existsSync(resolve(plugin, 'pnpm-lock.yaml'))).toBe(false);
   });
 
