@@ -1,56 +1,48 @@
 import React from 'react';
-import TestRenderer, { act, type ReactTestRendererJSON, type ReactTestRendererNode } from 'react-test-renderer';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import * as pluginPage from '../src/dashboard/web/plugin-page.js';
+import { PluginCapabilityList } from '../src/dashboard/web/plugin-capability-list.js';
 
-(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+type CapabilityListProps = React.ComponentProps<typeof PluginCapabilityList>;
 
-const commonProps = {
-  globalEnabled: false,
-  enabledBotCount: 0,
-  botCount: 1,
+const commonProps: CapabilityListProps = {
+  skillsCount: 0,
+  mcpCount: 0,
+  dashboardCount: 0,
+  contributions: {},
+  hasService: false,
 };
 
-function collectJsonText(node: ReactTestRendererNode | ReactTestRendererNode[] | null): string {
-  if (node === null) return '';
-  if (typeof node === 'string') return node;
-  if (Array.isArray(node)) return node.map(collectJsonText).join('');
-  return collectJsonText((node as ReactTestRendererJSON).children);
-}
-
-function renderCapabilitySummary(plugin: Record<string, unknown>): string {
-  const Component = (pluginPage as any).PluginCapabilitySummary;
-  let renderer!: TestRenderer.ReactTestRenderer;
-  act(() => {
-    renderer = TestRenderer.create(React.createElement(Component, { ...commonProps, plugin } as any));
-  });
-  const text = collectJsonText(renderer.toJSON());
-  act(() => renderer.unmount());
-  return text;
+function renderCapabilityList(overrides: Partial<CapabilityListProps> = {}): string {
+  const props: CapabilityListProps = {
+    ...commonProps,
+    ...overrides,
+  };
+  return renderToStaticMarkup(React.createElement(PluginCapabilityList, props));
 }
 
 describe('dashboard plugin capability summary', () => {
-  it('exports the capability summary component', () => {
-    expect((pluginPage as Record<string, unknown>).PluginCapabilitySummary).toBeTypeOf('function');
-  });
-
   it('shows the turn progress contribution as a capability', () => {
-    const text = renderCapabilitySummary({ contributions: { turnProgress: { entry: 'turn-progress/index.js' } } });
+    const markup = renderCapabilityList({
+      contributions: { turnProgress: { entry: 'turn-progress/index.js' } },
+    });
 
-    expect(text).toContain('1进度卡');
-    expect(text).not.toContain('未声明扩展能力');
+    expect(markup).toContain('<strong>1</strong>进度卡');
+    expect(markup).not.toContain('未声明扩展能力');
   });
 
   it('shows the Lark contribution as a capability', () => {
-    const text = renderCapabilitySummary({ contributions: { lark: { entry: 'lark/index.js' } } });
+    const markup = renderCapabilityList({
+      contributions: { lark: { entry: 'lark/index.js' } },
+    });
 
-    expect(text).toContain('1飞书协同');
-    expect(text).not.toContain('未声明扩展能力');
+    expect(markup).toContain('<strong>1</strong>飞书协同');
+    expect(markup).not.toContain('未声明扩展能力');
   });
 
   it('keeps the empty capability hint without contributions', () => {
-    const text = renderCapabilitySummary({ contributions: {} });
+    const markup = renderCapabilityList();
 
-    expect(text).toContain('未声明扩展能力');
+    expect(markup).toContain('未声明扩展能力');
   });
 });

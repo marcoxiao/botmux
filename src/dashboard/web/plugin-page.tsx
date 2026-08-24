@@ -8,6 +8,7 @@ import {
   type ComponentType,
   type ReactNode,
 } from 'react';
+import { PluginCapabilityList } from './plugin-capability-list.js';
 import { PLUGIN_PINS_CHANGED_EVENT } from './plugin-events.js';
 import { mountReactPage, type PageDisposer } from './react-mount.js';
 
@@ -630,34 +631,27 @@ function PluginBotSettings(props: {
   );
 }
 
-export function PluginCapabilitySummary(props: {
+function PluginCapabilitySummary(props: {
   plugin: ManagedPlugin;
   globalEnabled: boolean;
   enabledBotCount: number;
   botCount: number;
 }): React.JSX.Element {
-  const contributions = props.plugin.contributions;
-  const commands = contributions?.cli?.commands ?? [];
-  const capabilities = [
-    { label: 'Skills', count: props.plugin.skillsCount ?? 0 },
-    { label: 'MCP', count: props.plugin.mcpCount ?? 0 },
-    { label: '命令', count: commands.length },
-    { label: 'Dashboard', count: props.plugin.dashboard?.length ?? 0 },
-    { label: '进度卡', count: contributions?.turnProgress ? 1 : 0 },
-    { label: '飞书协同', count: contributions?.lark ? 1 : 0 },
-  ].filter(item => item.count > 0);
   return (
     <div className="plugin-card-summary">
       <div className="plugin-capability-summary" aria-label="插件能力摘要">
-        {capabilities.map(item => (
-          <span className="plugin-capability-chip" key={item.label}><strong>{item.count}</strong>{item.label}</span>
-        ))}
+        <PluginCapabilityList
+          skillsCount={props.plugin.skillsCount ?? 0}
+          mcpCount={props.plugin.mcpCount ?? 0}
+          dashboardCount={props.plugin.dashboard?.length ?? 0}
+          contributions={props.plugin.contributions}
+          hasService={Boolean(props.plugin.service)}
+        />
         {props.plugin.service ? (
           <span className={`plugin-capability-chip ${serviceStatusClass(props.plugin.serviceReport)}`}>
             Service {serviceDisplayLabel(props.plugin.serviceReport)}
           </span>
         ) : null}
-        {capabilities.length === 0 && !props.plugin.service ? <span className="plugin-muted">未声明扩展能力</span> : null}
       </div>
       <span className="plugin-scope-summary">
         {props.globalEnabled
