@@ -64,6 +64,7 @@ Expected: 契约与 `23/23` 插件测试 PASS，两个 diff 无输出。
 ### Task 2: 修正 Dashboard 插件能力摘要
 
 **Files:**
+- Create: `src/dashboard/web/plugin-capability-list.tsx`
 - Modify: `src/dashboard/web/plugin-page.tsx`
 - Create: `test/dashboard-plugin-capability-summary.test.ts`
 
@@ -94,6 +95,10 @@ Expected: contribution 两例 FAIL，因为当前类型和摘要数组尚未识�
 Run: `pnpm vitest run --project unit test/dashboard-plugin-capability-summary.test.ts test/dashboard-plugin-pin-ui.test.ts`
 
 Expected: PASS。
+
+- [ ] **Step 6: 保持 Dashboard 动态模块导出面最小**
+
+质量 Review 后把纯 capability chips 与空态提取到内部 `PluginCapabilityList`；`plugin-page.tsx` 继续只公开既有 `renderPluginPage`，不为测试导出内部 summary。测试直接以类型化 props 和 `react-dom/server` 渲染该内部组件，避免 `react-test-renderer` 弃用告警和 `any`。该文件拆分只隔离纯展示逻辑，不新增插件协议、状态或抽象层。
 
 ### Task 3: 自动化回归、架构卫生与代码审查
 
@@ -145,4 +150,3 @@ Critical/Important 必须修复并复审通过。审查重点是薄插件边界�
 - [ ] **Step 5: 将旧仓移入废纸篓并做旧路径缺失冷启动**
 
 不清空废纸篓。再次冷启动后核对 registry/link/manifest 并做双 Bot smoke；失败时先停 daemon，再恢复旧仓与旧 link。全部通过后结束维护窗口。
-
