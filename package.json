@@ -19,7 +19,10 @@
     "access": "public"
   },
   "scripts": {
-    "build": "pnpm desktop-handoff:build && pnpm audit:domains && node scripts/clean-dist.mjs && tsc && pnpm typecheck:scripts && node scripts/generate-runtime-build-id.mjs && cp src/setup/lark-scopes.json dist/setup/ && pnpm dashboard:bundle && chmod +x dist/cli.js && node scripts/audit-dist.mjs",
+    "build": "pnpm semantic-progress:build && pnpm desktop-handoff:build && pnpm audit:domains && node scripts/clean-dist.mjs && tsc && pnpm typecheck:scripts && node scripts/generate-runtime-build-id.mjs && cp src/setup/lark-scopes.json dist/setup/ && pnpm dashboard:bundle && chmod +x dist/cli.js && node scripts/audit-dist.mjs",
+    "semantic-progress:build": "pnpm --dir plugins/semantic-progress build",
+    "semantic-progress:test": "pnpm --dir plugins/semantic-progress test",
+    "semantic-progress:check": "pnpm --dir plugins/semantic-progress check",
     "desktop-handoff:build": "pnpm --dir plugins/desktop-handoff build",
     "desktop-handoff:test": "pnpm --dir plugins/desktop-handoff test",
     "desktop-handoff:check": "pnpm --dir plugins/desktop-handoff check",

@@ -44,5 +44,7 @@ jobs:
       - run: npm install -g pnpm@9.5.0
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - run: pnpm semantic-progress:test
+      - run: pnpm desktop-handoff:test
       - run: pnpm test
       - run: pnpm workflow-core:test

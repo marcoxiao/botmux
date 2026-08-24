@@ -1,0 +1,22 @@
+{
+  "name": "@botmux-ai/plugin-semantic-progress",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": ["dist"],
+  "scripts": {
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
+    "test": "vitest run",
+    "check": "pnpm test && pnpm build"
+  },
+  "keywords": ["botmux-plugin"],
+  "botmux": {
+    "schemaVersion": 1,
+    "id": "semantic-progress",
+    "displayName": "Semantic Progress"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "vitest": "^4.0.18"
+  }
+}
