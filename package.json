@@ -19,7 +19,10 @@
     "access": "public"
   },
   "scripts": {
-    "build": "pnpm audit:domains && node scripts/clean-dist.mjs && tsc && pnpm typecheck:scripts && node scripts/generate-runtime-build-id.mjs && cp src/setup/lark-scopes.json dist/setup/ && pnpm dashboard:bundle && chmod +x dist/cli.js && node scripts/audit-dist.mjs",
+    "build": "pnpm desktop-handoff:build && pnpm audit:domains && node scripts/clean-dist.mjs && tsc && pnpm typecheck:scripts && node scripts/generate-runtime-build-id.mjs && cp src/setup/lark-scopes.json dist/setup/ && pnpm dashboard:bundle && chmod +x dist/cli.js && node scripts/audit-dist.mjs",
+    "desktop-handoff:build": "pnpm --dir plugins/desktop-handoff build",
+    "desktop-handoff:test": "pnpm --dir plugins/desktop-handoff test",
+    "desktop-handoff:check": "pnpm --dir plugins/desktop-handoff check",
     "typecheck:scripts": "tsc -p tsconfig.scripts.json",
     "workflow-core:build": "node scripts/build-workflow-core-package.mjs",
     "workflow-core:test": "pnpm workflow-core:build && node scripts/test-workflow-core-package.mjs",

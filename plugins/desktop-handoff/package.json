@@ -1,0 +1,31 @@
+{
+  "name": "@botmux-ai/plugin-desktop-handoff",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "scripts/install-hooks.mjs",
+    "scripts/migrate-ledger-v2.mjs"
+  ],
+  "scripts": {
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
+    "test": "vitest run",
+    "check": "pnpm build && pnpm test",
+    "hooks:install": "node scripts/install-hooks.mjs"
+  },
+  "keywords": [
+    "botmux-plugin"
+  ],
+  "botmux": {
+    "schemaVersion": 1,
+    "id": "desktop-handoff",
+    "displayName": "Desktop Handoff"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.3.0",
+    "vitest": "^4.0.18"
+  }
+}
